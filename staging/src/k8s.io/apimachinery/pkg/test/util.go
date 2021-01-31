@@ -23,15 +23,28 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiserializer "k8s.io/apimachinery/pkg/runtime/serializer"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
-// List holds a list of objects, which may not be known by the server.
+// List and ListV1 should be kept in sync with k8s.io/kubernetes/pkg/api#List
+// and k8s.io/api/core/v1#List.
+//
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 type List struct {
 	metav1.TypeMeta
-	// +optional
 	metav1.ListMeta
 
 	Items []runtime.Object
+}
+
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type ListV1 struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+
+	Items []runtime.RawExtension `json:"items" protobuf:"bytes,2,rep,name=items"`
 }
 
 func TestScheme() (*runtime.Scheme, apiserializer.CodecFactory) {
@@ -49,8 +62,8 @@ func TestScheme() (*runtime.Scheme, apiserializer.CodecFactory) {
 		&v1.CarpList{},
 		&List{},
 	)
-	testapigroup.AddToScheme(scheme)
-	v1.AddToScheme(scheme)
+	utilruntime.Must(testapigroup.AddToScheme(scheme))
+	utilruntime.Must(v1.AddToScheme(scheme))
 
 	codecs := apiserializer.NewCodecFactory(scheme)
 	return scheme, codecs

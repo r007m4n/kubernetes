@@ -1,7 +1,5 @@
 package(default_visibility = ["//visibility:public"])
 
-licenses(["notice"])
-
 filegroup(
     name = "package-srcs",
     srcs = glob(["**"]),
@@ -14,8 +12,10 @@ filegroup(
     srcs = [
         ":package-srcs",
         "//hack/boilerplate:all-srcs",
+        "//hack/conformance:all-srcs",
         "//hack/e2e-internal:all-srcs",
         "//hack/lib:all-srcs",
+        "//hack/make-rules:all-srcs",
     ],
     tags = ["automanaged"],
 )
@@ -46,4 +46,11 @@ test_suite(
         "verify-boilerplate",
         #        "verify-gofmt",
     ],
+)
+
+sh_binary(
+    name = "update-mirror",
+    srcs = ["update-workspace-mirror.sh"],
+    args = ["$(location @workspace_urls//:urls.txt)"],
+    data = ["@workspace_urls//:urls.txt"],
 )

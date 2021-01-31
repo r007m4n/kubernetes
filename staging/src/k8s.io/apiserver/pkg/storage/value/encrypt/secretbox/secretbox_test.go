@@ -58,7 +58,7 @@ func TestSecretboxKeyRotation(t *testing.T) {
 
 	// verify changing the context does not fails storage
 	// Secretbox is not currently an authenticating store
-	from, stale, err = p.TransformFromStorage(out, value.DefaultContext([]byte("incorrect_context")))
+	_, _, err = p.TransformFromStorage(out, value.DefaultContext([]byte("incorrect_context")))
 	if err != nil {
 		t.Fatalf("secretbox is not authenticated")
 	}
@@ -77,14 +77,41 @@ func TestSecretboxKeyRotation(t *testing.T) {
 	}
 }
 
-func BenchmarkSecretboxRead_32_1024(b *testing.B)        { benchmarkSecretboxRead(b, 32, 1024, false) }
-func BenchmarkSecretboxRead_32_16384(b *testing.B)       { benchmarkSecretboxRead(b, 32, 16384, false) }
-func BenchmarkSecretboxRead_32_16384_Stale(b *testing.B) { benchmarkSecretboxRead(b, 32, 16384, true) }
+func BenchmarkSecretboxRead(b *testing.B) {
+	tests := []struct {
+		keyLength   int
+		valueLength int
+		expectStale bool
+	}{
+		{keyLength: 32, valueLength: 1024, expectStale: false},
+		{keyLength: 32, valueLength: 16384, expectStale: false},
+		{keyLength: 32, valueLength: 16384, expectStale: true},
+	}
+	for _, t := range tests {
+		name := fmt.Sprintf("%vKeyLength/%vValueLength/%vExpectStale", t.keyLength, t.valueLength, t.expectStale)
+		b.Run(name, func(b *testing.B) {
+			benchmarkSecretboxRead(b, t.keyLength, t.valueLength, t.expectStale)
+		})
+	}
+}
 
-func BenchmarkSecretboxWrite_32_1024(b *testing.B)  { benchmarkSecretboxWrite(b, 32, 1024) }
-func BenchmarkSecretboxWrite_32_16384(b *testing.B) { benchmarkSecretboxWrite(b, 32, 16384) }
+func BenchmarkSecretboxWrite(b *testing.B) {
+	tests := []struct {
+		keyLength   int
+		valueLength int
+	}{
+		{keyLength: 32, valueLength: 1024},
+		{keyLength: 32, valueLength: 16384},
+	}
+	for _, t := range tests {
+		name := fmt.Sprintf("%vKeyLength/%vValueLength", t.keyLength, t.valueLength)
+		b.Run(name, func(b *testing.B) {
+			benchmarkSecretboxWrite(b, t.keyLength, t.valueLength)
+		})
+	}
+}
 
-func benchmarkSecretboxRead(b *testing.B, keyLength int, valueLength int, stale bool) {
+func benchmarkSecretboxRead(b *testing.B, keyLength int, valueLength int, expectStale bool) {
 	p := value.NewPrefixTransformers(nil,
 		value.PrefixTransformer{Prefix: []byte("first:"), Transformer: NewSecretboxTransformer(key1)},
 		value.PrefixTransformer{Prefix: []byte("second:"), Transformer: NewSecretboxTransformer(key2)},
@@ -97,11 +124,11 @@ func benchmarkSecretboxRead(b *testing.B, keyLength int, valueLength int, stale 
 	if err != nil {
 		b.Fatal(err)
 	}
-	// reverse the key order if stale
-	if stale {
+	// reverse the key order if expecting stale
+	if expectStale {
 		p = value.NewPrefixTransformers(nil,
-			value.PrefixTransformer{Prefix: []byte("first:"), Transformer: NewSecretboxTransformer(key1)},
 			value.PrefixTransformer{Prefix: []byte("second:"), Transformer: NewSecretboxTransformer(key2)},
+			value.PrefixTransformer{Prefix: []byte("first:"), Transformer: NewSecretboxTransformer(key1)},
 		)
 	}
 
@@ -111,8 +138,8 @@ func benchmarkSecretboxRead(b *testing.B, keyLength int, valueLength int, stale 
 		if err != nil {
 			b.Fatal(err)
 		}
-		if stale {
-			b.Fatalf("unexpected data: %t %q", stale, from)
+		if expectStale != stale {
+			b.Fatalf("unexpected data: %q, expect stale %t but got %t", from, expectStale, stale)
 		}
 	}
 	b.StopTimer()
@@ -145,7 +172,7 @@ func TestRoundTrip(t *testing.T) {
 		context value.Context
 		t       value.Transformer
 	}{
-		{name: "GCM 16 byte key", t: NewSecretboxTransformer(key1)},
+		{name: "Secretbox 32 byte key", t: NewSecretboxTransformer(key1)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

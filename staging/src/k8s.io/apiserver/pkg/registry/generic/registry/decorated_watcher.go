@@ -17,22 +17,22 @@ limitations under the License.
 package registry
 
 import (
+	"context"
 	"net/http"
 
-	"golang.org/x/net/context"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
 type decoratedWatcher struct {
 	w         watch.Interface
-	decorator ObjectFunc
+	decorator func(runtime.Object)
 	cancel    context.CancelFunc
 	resultCh  chan watch.Event
 }
 
-func newDecoratedWatcher(w watch.Interface, decorator ObjectFunc) *decoratedWatcher {
+func newDecoratedWatcher(w watch.Interface, decorator func(runtime.Object)) *decoratedWatcher {
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &decoratedWatcher{
 		w:         w,
@@ -46,16 +46,18 @@ func newDecoratedWatcher(w watch.Interface, decorator ObjectFunc) *decoratedWatc
 
 func (d *decoratedWatcher) run(ctx context.Context) {
 	var recv, send watch.Event
+	var ok bool
 	for {
 		select {
-		case recv = <-d.w.ResultChan():
+		case recv, ok = <-d.w.ResultChan():
+			// The underlying channel may be closed after timeout.
+			if !ok {
+				d.cancel()
+				return
+			}
 			switch recv.Type {
-			case watch.Added, watch.Modified, watch.Deleted:
-				err := d.decorator(recv.Object)
-				if err != nil {
-					send = makeStatusErrorEvent(err)
-					break
-				}
+			case watch.Added, watch.Modified, watch.Deleted, watch.Bookmark:
+				d.decorator(recv.Object)
 				send = recv
 			case watch.Error:
 				send = recv

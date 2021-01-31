@@ -52,6 +52,9 @@ type Attributes struct {
 	// The system uuid
 	SystemUUID string `json:"system_uuid"`
 
+	// HugePages on this machine.
+	HugePages []v1.HugePagesInfo `json:"hugepages"`
+
 	// Filesystems on this machine.
 	Filesystems []v1.FsInfo `json:"filesystems"`
 
@@ -84,6 +87,7 @@ func GetAttributes(mi *v1.MachineInfo, vi *v1.VersionInfo) Attributes {
 		MemoryCapacity:     mi.MemoryCapacity,
 		MachineID:          mi.MachineID,
 		SystemUUID:         mi.SystemUUID,
+		HugePages:          mi.HugePages,
 		Filesystems:        mi.Filesystems,
 		DiskMap:            mi.DiskMap,
 		NetworkDevices:     mi.NetworkDevices,

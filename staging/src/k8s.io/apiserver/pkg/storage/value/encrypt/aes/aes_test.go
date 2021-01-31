@@ -78,7 +78,7 @@ func TestGCMKeyRotation(t *testing.T) {
 	}
 
 	// verify changing the context fails storage
-	from, stale, err = p.TransformFromStorage(out, value.DefaultContext([]byte("incorrect_context")))
+	_, _, err = p.TransformFromStorage(out, value.DefaultContext([]byte("incorrect_context")))
 	if err == nil {
 		t.Fatalf("expected unauthenticated data")
 	}
@@ -130,7 +130,7 @@ func TestCBCKeyRotation(t *testing.T) {
 	}
 
 	// verify changing the context fails storage
-	from, stale, err = p.TransformFromStorage(out, value.DefaultContext([]byte("incorrect_context")))
+	_, _, err = p.TransformFromStorage(out, value.DefaultContext([]byte("incorrect_context")))
 	if err != nil {
 		t.Fatalf("CBC mode does not support authentication: %v", err)
 	}
@@ -149,16 +149,43 @@ func TestCBCKeyRotation(t *testing.T) {
 	}
 }
 
-func BenchmarkGCMRead_16_1024(b *testing.B)        { benchmarkGCMRead(b, 16, 1024, false) }
-func BenchmarkGCMRead_32_1024(b *testing.B)        { benchmarkGCMRead(b, 32, 1024, false) }
-func BenchmarkGCMRead_32_16384(b *testing.B)       { benchmarkGCMRead(b, 32, 16384, false) }
-func BenchmarkGCMRead_32_16384_Stale(b *testing.B) { benchmarkGCMRead(b, 32, 16384, true) }
+func BenchmarkGCMRead(b *testing.B) {
+	tests := []struct {
+		keyLength   int
+		valueLength int
+		expectStale bool
+	}{
+		{keyLength: 16, valueLength: 1024, expectStale: false},
+		{keyLength: 32, valueLength: 1024, expectStale: false},
+		{keyLength: 32, valueLength: 16384, expectStale: false},
+		{keyLength: 32, valueLength: 16384, expectStale: true},
+	}
+	for _, t := range tests {
+		name := fmt.Sprintf("%vKeyLength/%vValueLength/%vExpectStale", t.keyLength, t.valueLength, t.expectStale)
+		b.Run(name, func(b *testing.B) {
+			benchmarkGCMRead(b, t.keyLength, t.valueLength, t.expectStale)
+		})
+	}
+}
 
-func BenchmarkGCMWrite_16_1024(b *testing.B)  { benchmarkGCMWrite(b, 16, 1024) }
-func BenchmarkGCMWrite_32_1024(b *testing.B)  { benchmarkGCMWrite(b, 32, 1024) }
-func BenchmarkGCMWrite_32_16384(b *testing.B) { benchmarkGCMWrite(b, 32, 16384) }
+func BenchmarkGCMWrite(b *testing.B) {
+	tests := []struct {
+		keyLength   int
+		valueLength int
+	}{
+		{keyLength: 16, valueLength: 1024},
+		{keyLength: 32, valueLength: 1024},
+		{keyLength: 32, valueLength: 16384},
+	}
+	for _, t := range tests {
+		name := fmt.Sprintf("%vKeyLength/%vValueLength", t.keyLength, t.valueLength)
+		b.Run(name, func(b *testing.B) {
+			benchmarkGCMWrite(b, t.keyLength, t.valueLength)
+		})
+	}
+}
 
-func benchmarkGCMRead(b *testing.B, keyLength int, valueLength int, stale bool) {
+func benchmarkGCMRead(b *testing.B, keyLength int, valueLength int, expectStale bool) {
 	block1, err := aes.NewCipher(bytes.Repeat([]byte("a"), keyLength))
 	if err != nil {
 		b.Fatal(err)
@@ -179,11 +206,11 @@ func benchmarkGCMRead(b *testing.B, keyLength int, valueLength int, stale bool) 
 	if err != nil {
 		b.Fatal(err)
 	}
-	// reverse the key order if stale
-	if stale {
+	// reverse the key order if expecting stale
+	if expectStale {
 		p = value.NewPrefixTransformers(nil,
-			value.PrefixTransformer{Prefix: []byte("first:"), Transformer: NewGCMTransformer(block1)},
 			value.PrefixTransformer{Prefix: []byte("second:"), Transformer: NewGCMTransformer(block2)},
+			value.PrefixTransformer{Prefix: []byte("first:"), Transformer: NewGCMTransformer(block1)},
 		)
 	}
 
@@ -193,8 +220,8 @@ func benchmarkGCMRead(b *testing.B, keyLength int, valueLength int, stale bool) 
 		if err != nil {
 			b.Fatal(err)
 		}
-		if stale {
-			b.Fatalf("unexpected data: %t %q", stale, from)
+		if expectStale != stale {
+			b.Fatalf("unexpected data: %q, expect stale %t but got %t", from, expectStale, stale)
 		}
 	}
 	b.StopTimer()
@@ -227,14 +254,41 @@ func benchmarkGCMWrite(b *testing.B, keyLength int, valueLength int) {
 	b.StopTimer()
 }
 
-func BenchmarkCBCRead_32_1024(b *testing.B)        { benchmarkCBCRead(b, 32, 1024, false) }
-func BenchmarkCBCRead_32_16384(b *testing.B)       { benchmarkCBCRead(b, 32, 16384, false) }
-func BenchmarkCBCRead_32_16384_Stale(b *testing.B) { benchmarkCBCRead(b, 32, 16384, true) }
+func BenchmarkCBCRead(b *testing.B) {
+	tests := []struct {
+		keyLength   int
+		valueLength int
+		expectStale bool
+	}{
+		{keyLength: 32, valueLength: 1024, expectStale: false},
+		{keyLength: 32, valueLength: 16384, expectStale: false},
+		{keyLength: 32, valueLength: 16384, expectStale: true},
+	}
+	for _, t := range tests {
+		name := fmt.Sprintf("%vKeyLength/%vValueLength/%vExpectStale", t.keyLength, t.valueLength, t.expectStale)
+		b.Run(name, func(b *testing.B) {
+			benchmarkCBCRead(b, t.keyLength, t.valueLength, t.expectStale)
+		})
+	}
+}
 
-func BenchmarkCBCWrite_32_1024(b *testing.B)  { benchmarkCBCWrite(b, 32, 1024) }
-func BenchmarkCBCWrite_32_16384(b *testing.B) { benchmarkCBCWrite(b, 32, 16384) }
+func BenchmarkCBCWrite(b *testing.B) {
+	tests := []struct {
+		keyLength   int
+		valueLength int
+	}{
+		{keyLength: 32, valueLength: 1024},
+		{keyLength: 32, valueLength: 16384},
+	}
+	for _, t := range tests {
+		name := fmt.Sprintf("%vKeyLength/%vValueLength", t.keyLength, t.valueLength)
+		b.Run(name, func(b *testing.B) {
+			benchmarkCBCWrite(b, t.keyLength, t.valueLength)
+		})
+	}
+}
 
-func benchmarkCBCRead(b *testing.B, keyLength int, valueLength int, stale bool) {
+func benchmarkCBCRead(b *testing.B, keyLength int, valueLength int, expectStale bool) {
 	block1, err := aes.NewCipher(bytes.Repeat([]byte("a"), keyLength))
 	if err != nil {
 		b.Fatal(err)
@@ -255,11 +309,11 @@ func benchmarkCBCRead(b *testing.B, keyLength int, valueLength int, stale bool) 
 	if err != nil {
 		b.Fatal(err)
 	}
-	// reverse the key order if stale
-	if stale {
+	// reverse the key order if expecting stale
+	if expectStale {
 		p = value.NewPrefixTransformers(nil,
-			value.PrefixTransformer{Prefix: []byte("first:"), Transformer: NewCBCTransformer(block1)},
 			value.PrefixTransformer{Prefix: []byte("second:"), Transformer: NewCBCTransformer(block2)},
+			value.PrefixTransformer{Prefix: []byte("first:"), Transformer: NewCBCTransformer(block1)},
 		)
 	}
 
@@ -269,8 +323,8 @@ func benchmarkCBCRead(b *testing.B, keyLength int, valueLength int, stale bool) 
 		if err != nil {
 			b.Fatal(err)
 		}
-		if stale {
-			b.Fatalf("unexpected data: %t %q", stale, from)
+		if expectStale != stale {
+			b.Fatalf("unexpected data: %q, expect stale %t but got %t", from, expectStale, stale)
 		}
 	}
 	b.StopTimer()

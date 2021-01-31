@@ -19,24 +19,22 @@ package main
 import (
 	"flag"
 	"os"
-	"runtime"
+
+	"k8s.io/klog/v2"
 
 	"k8s.io/apiextensions-apiserver/pkg/cmd/server"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apiserver/pkg/util/logs"
+	genericapiserver "k8s.io/apiserver/pkg/server"
+	"k8s.io/component-base/logs"
 )
 
 func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 
-	if len(os.Getenv("GOMAXPROCS")) == 0 {
-		runtime.GOMAXPROCS(runtime.NumCPU())
-	}
-
-	cmd := server.NewCommandStartCustomResourceDefinitionsServer(os.Stdout, os.Stderr, wait.NeverStop)
+	stopCh := genericapiserver.SetupSignalHandler()
+	cmd := server.NewServerCommand(os.Stdout, os.Stderr, stopCh)
 	cmd.Flags().AddGoFlagSet(flag.CommandLine)
 	if err := cmd.Execute(); err != nil {
-		panic(err)
+		klog.Fatal(err)
 	}
 }

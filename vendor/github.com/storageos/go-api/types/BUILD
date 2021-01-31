@@ -1,38 +1,41 @@
-package(default_visibility = ["//visibility:public"])
-
-licenses(["notice"])
-
-load(
-    "@io_bazel_rules_go//go:def.bzl",
-    "go_library",
-)
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "go_default_library",
     srcs = [
         "auth.go",
         "capacity_stats.go",
-        "controller.go",
-        "controller_update_options.go",
+        "cluster.go",
+        "connectivity.go",
         "delete_options.go",
         "deployment.go",
         "driver_instance.go",
         "error_response.go",
         "events.go",
+        "health.go",
+        "licence.go",
         "list_options.go",
+        "logger.go",
         "namespace.go",
+        "node.go",
+        "node_update_options.go",
         "operator.go",
+        "policy.go",
         "pool.go",
-        "pool_create_options.go",
+        "pool_options.go",
         "rule.go",
         "template.go",
         "template_create_options.go",
+        "user.go",
         "version.go",
         "volume.go",
         "volume_create_options.go",
+        "volume_stats.go",
         "volume_update_options.go",
     ],
-    tags = ["automanaged"],
+    importmap = "k8s.io/kubernetes/vendor/github.com/storageos/go-api/types",
+    importpath = "github.com/storageos/go-api/types",
+    visibility = ["//visibility:public"],
 )
 
 filegroup(
@@ -46,4 +49,5 @@ filegroup(
     name = "all-srcs",
     srcs = [":package-srcs"],
     tags = ["automanaged"],
+    visibility = ["//visibility:public"],
 )

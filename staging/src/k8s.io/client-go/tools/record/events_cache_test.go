@@ -18,6 +18,7 @@ package record
 
 import (
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -69,10 +70,10 @@ func makeUniqueEvents(num int) []v1.Event {
 	events := []v1.Event{}
 	kind := "Pod"
 	for i := 0; i < num; i++ {
-		reason := strings.Join([]string{"reason", string(i)}, "-")
-		message := strings.Join([]string{"message", string(i)}, "-")
-		name := strings.Join([]string{"pod", string(i)}, "-")
-		namespace := strings.Join([]string{"ns", string(i)}, "-")
+		reason := strings.Join([]string{"reason", strconv.Itoa(i)}, "-")
+		message := strings.Join([]string{"message", strconv.Itoa(i)}, "-")
+		name := strings.Join([]string{"pod", strconv.Itoa(i)}, "-")
+		namespace := strings.Join([]string{"ns", strconv.Itoa(i)}, "-")
 		involvedObject := makeObjectReference(kind, name, namespace)
 		events = append(events, makeEvent(reason, message, involvedObject))
 	}
@@ -82,7 +83,7 @@ func makeUniqueEvents(num int) []v1.Event {
 func makeSimilarEvents(num int, template v1.Event, messagePrefix string) []v1.Event {
 	events := makeEvents(num, template)
 	for i := range events {
-		events[i].Message = strings.Join([]string{messagePrefix, string(i), events[i].Message}, "-")
+		events[i].Message = strings.Join([]string{messagePrefix, strconv.Itoa(i), events[i].Message}, "-")
 	}
 	return events
 }
@@ -102,7 +103,7 @@ func validateEvent(messagePrefix string, actualEvent *v1.Event, expectedEvent *v
 	}
 	actualFirstTimestamp := recvEvent.FirstTimestamp
 	actualLastTimestamp := recvEvent.LastTimestamp
-	if actualFirstTimestamp.Equal(actualLastTimestamp) {
+	if actualFirstTimestamp.Equal(&actualLastTimestamp) {
 		if expectCompression {
 			t.Errorf("%v - FirstTimestamp (%q) and LastTimestamp (%q) must be different to indicate event compression happened, but were the same. Actual Event: %#v", messagePrefix, actualFirstTimestamp, actualLastTimestamp, recvEvent)
 		}
@@ -125,14 +126,6 @@ func validateEvent(messagePrefix string, actualEvent *v1.Event, expectedEvent *v
 	recvEvent.FirstTimestamp = actualFirstTimestamp
 	recvEvent.LastTimestamp = actualLastTimestamp
 	return actualEvent, nil
-}
-
-// TestDefaultEventFilterFunc ensures that no events are filtered
-func TestDefaultEventFilterFunc(t *testing.T) {
-	event := makeEvent("end-of-world", "it was fun", makeObjectReference("Pod", "pod1", "other"))
-	if DefaultEventFilterFunc(&event) {
-		t.Fatalf("DefaultEventFilterFunc should always return false")
-	}
 }
 
 // TestEventAggregatorByReasonFunc ensures that two events are aggregated if they vary only by event.message
@@ -181,6 +174,7 @@ func TestEventCorrelator(t *testing.T) {
 		newEvent        v1.Event
 		expectedEvent   v1.Event
 		intervalSeconds int
+		expectedSkip    bool
 	}{
 		"create-a-single-event": {
 			previousEvents:  []v1.Event{},
@@ -198,7 +192,13 @@ func TestEventCorrelator(t *testing.T) {
 			previousEvents:  makeEvents(defaultAggregateMaxEvents, duplicateEvent),
 			newEvent:        duplicateEvent,
 			expectedEvent:   setCount(duplicateEvent, defaultAggregateMaxEvents+1),
-			intervalSeconds: 5,
+			intervalSeconds: 30, // larger interval induces aggregation but not spam.
+		},
+		"the-same-event-is-spam-if-happens-too-frequently": {
+			previousEvents:  makeEvents(defaultSpamBurst+1, duplicateEvent),
+			newEvent:        duplicateEvent,
+			expectedSkip:    true,
+			intervalSeconds: 1,
 		},
 		"create-many-unique-events": {
 			previousEvents:  makeUniqueEvents(30),
@@ -245,7 +245,10 @@ func TestEventCorrelator(t *testing.T) {
 			if err != nil {
 				t.Errorf("scenario %v: unexpected error playing back prevEvents %v", testScenario, err)
 			}
-			correlator.UpdateState(result.Event)
+			// if we are skipping the event, we can avoid updating state
+			if !result.Skip {
+				correlator.UpdateState(result.Event)
+			}
 		}
 
 		// update the input to current clock value
@@ -257,6 +260,18 @@ func TestEventCorrelator(t *testing.T) {
 			t.Errorf("scenario %v: unexpected error correlating input event %v", testScenario, err)
 		}
 
+		// verify we did not get skip from filter function unexpectedly...
+		if result.Skip != testInput.expectedSkip {
+			t.Errorf("scenario %v: expected skip %v, but got %v", testScenario, testInput.expectedSkip, result.Skip)
+			continue
+		}
+
+		// we wanted to actually skip, so no event is needed to validate
+		if testInput.expectedSkip {
+			continue
+		}
+
+		// validate event
 		_, err = validateEvent(testScenario, result.Event, &testInput.expectedEvent, t)
 		if err != nil {
 			t.Errorf("scenario %v: unexpected error validating result %v", testScenario, err)

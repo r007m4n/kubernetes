@@ -17,31 +17,37 @@ limitations under the License.
 package routes
 
 import (
-	"github.com/emicklei/go-restful"
+	restful "github.com/emicklei/go-restful"
+	"github.com/go-openapi/spec"
+	"k8s.io/klog/v2"
 
-	"k8s.io/apimachinery/pkg/openapi"
 	"k8s.io/apiserver/pkg/server/mux"
-	apiserveropenapi "k8s.io/apiserver/pkg/server/openapi"
-
-	"github.com/golang/glog"
+	"k8s.io/kube-openapi/pkg/builder"
+	"k8s.io/kube-openapi/pkg/common"
+	"k8s.io/kube-openapi/pkg/handler"
 )
 
 // OpenAPI installs spec endpoints for each web service.
 type OpenAPI struct {
-	Config *openapi.Config
+	Config *common.Config
 }
 
 // Install adds the SwaggerUI webservice to the given mux.
-func (oa OpenAPI) Install(c *restful.Container, mux *mux.PathRecorderMux) *apiserveropenapi.OpenAPIService {
-	openapiSpec, err := apiserveropenapi.BuildSwaggerSpec(c.RegisteredWebServices(), oa.Config)
+func (oa OpenAPI) Install(c *restful.Container, mux *mux.PathRecorderMux) (*handler.OpenAPIService, *spec.Swagger) {
+	spec, err := builder.BuildOpenAPISpec(c.RegisteredWebServices(), oa.Config)
 	if err != nil {
-		glog.Fatalf("Failed to register open api spec for root: %v", err)
-		return nil
+		klog.Fatalf("Failed to build open api spec for root: %v", err)
 	}
-	service, err := apiserveropenapi.RegisterOpenAPIService(openapiSpec, "/swagger.json", mux)
+	spec.Definitions = handler.PruneDefaults(spec.Definitions)
+	openAPIVersionedService, err := handler.NewOpenAPIService(spec)
 	if err != nil {
-		glog.Fatalf("Failed to register open api spec for root: %v", err)
-		return nil
+		klog.Fatalf("Failed to create OpenAPIService: %v", err)
 	}
-	return service
+
+	err = openAPIVersionedService.RegisterOpenAPIVersionedService("/openapi/v2", mux)
+	if err != nil {
+		klog.Fatalf("Failed to register versioned open api spec for root: %v", err)
+	}
+
+	return openAPIVersionedService, spec
 }

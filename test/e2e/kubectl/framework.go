@@ -16,8 +16,9 @@ limitations under the License.
 
 package kubectl
 
-import "k8s.io/kubernetes/test/e2e/framework"
+import "github.com/onsi/ginkgo"
 
-func kubectlDescribe(text string, body func()) bool {
-	return framework.KubeDescribe("[sig-cli] "+text, body)
+// SIGDescribe annotates the test with the SIG label.
+func SIGDescribe(text string, body func()) bool {
+	return ginkgo.Describe("[sig-cli] "+text, body)
 }

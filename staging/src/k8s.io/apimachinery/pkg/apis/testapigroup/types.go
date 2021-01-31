@@ -27,6 +27,8 @@ type (
 	RestartPolicy     string
 )
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // Carp is a collection of containers, used as either input (create, update) or as output (list, get).
 type Carp struct {
 	metav1.TypeMeta
@@ -53,7 +55,7 @@ type CarpStatus struct {
 	// A human readable message indicating details about why the carp is in this state.
 	// +optional
 	Message string
-	// A brief CamelCase message indicating details about why the carp is in this state. e.g. 'OutOfDisk'
+	// A brief CamelCase message indicating details about why the carp is in this state. e.g. 'DiskPressure'
 	// +optional
 	Reason string
 
@@ -123,6 +125,8 @@ type CarpSpec struct {
 	// +optional
 	SchedulerName string
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // CarpList is a list of Carps.
 type CarpList struct {

@@ -1,3 +1,5 @@
+// +build !dockerless
+
 /*
 Copyright 2015 The Kubernetes Authors.
 
@@ -17,30 +19,23 @@ limitations under the License.
 package dockershim
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"time"
 
-	dockertypes "github.com/docker/engine-api/types"
-	"github.com/golang/glog"
+	dockertypes "github.com/docker/docker/api/types"
 
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/klog/v2"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
-	utilexec "k8s.io/kubernetes/pkg/util/exec"
-	"k8s.io/kubernetes/pkg/util/term"
-
 	"k8s.io/kubernetes/pkg/kubelet/dockershim/libdocker"
 )
 
 // ExecHandler knows how to execute a command in a running Docker container.
 type ExecHandler interface {
-	ExecInContainer(client libdocker.Interface, container *dockertypes.ContainerJSON, cmd []string, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resize <-chan remotecommand.TerminalSize, timeout time.Duration) error
+	ExecInContainer(ctx context.Context, client libdocker.Interface, container *dockertypes.ContainerJSON, cmd []string, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resize <-chan remotecommand.TerminalSize, timeout time.Duration) error
 }
-
-// NsenterExecHandler executes commands in Docker containers using nsenter.
-type NsenterExecHandler struct{}
 
 type dockerExitError struct {
 	Inspect *dockertypes.ContainerExecInspect
@@ -62,79 +57,14 @@ func (d *dockerExitError) ExitStatus() int {
 	return d.Inspect.ExitCode
 }
 
-// TODO should we support nsenter in a container, running with elevated privs and --pid=host?
-func (*NsenterExecHandler) ExecInContainer(client libdocker.Interface, container *dockertypes.ContainerJSON, cmd []string, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resize <-chan remotecommand.TerminalSize, timeout time.Duration) error {
-	nsenter, err := exec.LookPath("nsenter")
-	if err != nil {
-		return fmt.Errorf("exec unavailable - unable to locate nsenter")
-	}
-
-	containerPid := container.State.Pid
-
-	// TODO what if the container doesn't have `env`???
-	args := []string{"-t", fmt.Sprintf("%d", containerPid), "-m", "-i", "-u", "-n", "-p", "--", "env", "-i"}
-	args = append(args, fmt.Sprintf("HOSTNAME=%s", container.Config.Hostname))
-	args = append(args, container.Config.Env...)
-	args = append(args, cmd...)
-	command := exec.Command(nsenter, args...)
-	var cmdErr error
-	if tty {
-		p, err := kubecontainer.StartPty(command)
-		if err != nil {
-			return err
-		}
-		defer p.Close()
-
-		// make sure to close the stdout stream
-		defer stdout.Close()
-
-		kubecontainer.HandleResizing(resize, func(size remotecommand.TerminalSize) {
-			term.SetSize(p.Fd(), size)
-		})
-
-		if stdin != nil {
-			go io.Copy(p, stdin)
-		}
-
-		if stdout != nil {
-			go io.Copy(stdout, p)
-		}
-
-		cmdErr = command.Wait()
-	} else {
-		if stdin != nil {
-			// Use an os.Pipe here as it returns true *os.File objects.
-			// This way, if you run 'kubectl exec <pod> -i bash' (no tty) and type 'exit',
-			// the call below to command.Run() can unblock because its Stdin is the read half
-			// of the pipe.
-			r, w, err := os.Pipe()
-			if err != nil {
-				return err
-			}
-			go io.Copy(w, stdin)
-
-			command.Stdin = r
-		}
-		if stdout != nil {
-			command.Stdout = stdout
-		}
-		if stderr != nil {
-			command.Stderr = stderr
-		}
-
-		cmdErr = command.Run()
-	}
-
-	if exitErr, ok := cmdErr.(*exec.ExitError); ok {
-		return &utilexec.ExitErrorWrapper{ExitError: exitErr}
-	}
-	return cmdErr
-}
-
 // NativeExecHandler executes commands in Docker containers using Docker's exec API.
 type NativeExecHandler struct{}
 
-func (*NativeExecHandler) ExecInContainer(client libdocker.Interface, container *dockertypes.ContainerJSON, cmd []string, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resize <-chan remotecommand.TerminalSize, timeout time.Duration) error {
+// ExecInContainer executes the cmd in container using the Docker's exec API
+func (*NativeExecHandler) ExecInContainer(ctx context.Context, client libdocker.Interface, container *dockertypes.ContainerJSON, cmd []string, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool, resize <-chan remotecommand.TerminalSize, timeout time.Duration) error {
+	done := make(chan struct{})
+	defer close(done)
+
 	createOpts := dockertypes.ExecConfig{
 		Cmd:          cmd,
 		AttachStdin:  stdin != nil,
@@ -149,9 +79,23 @@ func (*NativeExecHandler) ExecInContainer(client libdocker.Interface, container 
 
 	// Have to start this before the call to client.StartExec because client.StartExec is a blocking
 	// call :-( Otherwise, resize events don't get processed and the terminal never resizes.
-	kubecontainer.HandleResizing(resize, func(size remotecommand.TerminalSize) {
-		client.ResizeExecTTY(execObj.ID, int(size.Height), int(size.Width))
-	})
+	//
+	// We also have to delay attempting to send a terminal resize request to docker until after the
+	// exec has started; otherwise, the initial resize request will fail.
+	execStarted := make(chan struct{})
+	go func() {
+		select {
+		case <-execStarted:
+			// client.StartExec has started the exec, so we can start resizing
+		case <-done:
+			// ExecInContainer has returned, so short-circuit
+			return
+		}
+
+		kubecontainer.HandleResizing(resize, func(size remotecommand.TerminalSize) {
+			client.ResizeExecTTY(execObj.ID, uint(size.Height), uint(size.Width))
+		})
+	}()
 
 	startOpts := dockertypes.ExecStartCheck{Detach: false, Tty: tty}
 	streamOpts := libdocker.StreamOptions{
@@ -159,35 +103,57 @@ func (*NativeExecHandler) ExecInContainer(client libdocker.Interface, container 
 		OutputStream: stdout,
 		ErrorStream:  stderr,
 		RawTerminal:  tty,
-	}
-	err = client.StartExec(execObj.ID, startOpts, streamOpts)
-	if err != nil {
-		return err
+		ExecStarted:  execStarted,
 	}
 
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	// StartExec is a blocking call, so we need to run it concurrently and catch
+	// its error in a channel
+	execErr := make(chan error, 1)
+	go func() {
+		execErr <- client.StartExec(execObj.ID, startOpts, streamOpts)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-execErr:
+		if err != nil {
+			return err
+		}
+	}
+
+	// InspectExec may not always return latest state of exec, so call it a few times until
+	// it returns an exec inspect that shows that the process is no longer running.
+	retries := 0
+	maxRetries := 5
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	count := 0
 	for {
-		inspect, err2 := client.InspectExec(execObj.ID)
-		if err2 != nil {
-			return err2
-		}
-		if !inspect.Running {
-			if inspect.ExitCode != 0 {
-				err = &dockerExitError{inspect}
-			}
-			break
+		inspect, err := client.InspectExec(execObj.ID)
+		if err != nil {
+			return err
 		}
 
-		count++
-		if count == 5 {
-			glog.Errorf("Exec session %s in container %s terminated but process still running!", execObj.ID, container.ID)
-			break
+		if !inspect.Running {
+			if inspect.ExitCode != 0 {
+				return &dockerExitError{inspect}
+			}
+
+			return nil
+		}
+
+		retries++
+		if retries == maxRetries {
+			klog.Errorf("Exec session %s in container %s terminated but process still running!", execObj.ID, container.ID)
+			return nil
 		}
 
 		<-ticker.C
 	}
-
-	return err
 }

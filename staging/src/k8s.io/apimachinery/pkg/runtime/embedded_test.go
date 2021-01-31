@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	runtimetesting "k8s.io/apimachinery/pkg/runtime/testing"
 	"k8s.io/apimachinery/pkg/util/diff"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
 func TestDecodeEmptyRawExtensionAsObject(t *testing.T) {
@@ -37,6 +38,7 @@ func TestDecodeEmptyRawExtensionAsObject(t *testing.T) {
 	s := runtime.NewScheme()
 	s.AddKnownTypes(internalGV, &runtimetesting.ObjectTest{})
 	s.AddKnownTypeWithName(externalGVK, &runtimetesting.ObjectTestExternal{})
+	utilruntime.Must(runtimetesting.RegisterConversions(s))
 
 	codec := serializer.NewCodecFactory(s).LegacyCodec(externalGV)
 
@@ -74,6 +76,7 @@ func TestArrayOfRuntimeObject(t *testing.T) {
 	s.AddKnownTypeWithName(externalGV.WithKind("EmbeddedTest"), &runtimetesting.EmbeddedTestExternal{})
 	s.AddKnownTypes(internalGV, &runtimetesting.ObjectTest{})
 	s.AddKnownTypeWithName(externalGV.WithKind("ObjectTest"), &runtimetesting.ObjectTestExternal{})
+	utilruntime.Must(runtimetesting.RegisterConversions(s))
 
 	codec := serializer.NewCodecFactory(s).LegacyCodec(externalGV)
 
@@ -148,6 +151,7 @@ func TestNestedObject(t *testing.T) {
 	s := runtime.NewScheme()
 	s.AddKnownTypes(internalGV, &runtimetesting.EmbeddedTest{})
 	s.AddKnownTypeWithName(embeddedTestExternalGVK, &runtimetesting.EmbeddedTestExternal{})
+	utilruntime.Must(runtimetesting.RegisterConversions(s))
 
 	codec := serializer.NewCodecFactory(s).LegacyCodec(externalGV)
 
@@ -197,8 +201,8 @@ func TestNestedObject(t *testing.T) {
 	if externalViaJSON.Kind == "" || externalViaJSON.APIVersion == "" || externalViaJSON.ID != "outer" {
 		t.Errorf("Expected objects to have type info set, got %#v", externalViaJSON)
 	}
-	if !reflect.DeepEqual(externalViaJSON.EmptyObject.Raw, []byte("null")) || len(externalViaJSON.Object.Raw) == 0 {
-		t.Errorf("Expected deserialization of nested objects into bytes, got %#v", externalViaJSON)
+	if len(externalViaJSON.EmptyObject.Raw) > 0 {
+		t.Errorf("Expected deserialization of empty nested objects into empty bytes, got %#v", externalViaJSON)
 	}
 
 	// test JSON decoding, too, since Decode uses yaml unmarshalling.
@@ -227,6 +231,7 @@ func TestDeepCopyOfRuntimeObject(t *testing.T) {
 	s := runtime.NewScheme()
 	s.AddKnownTypes(internalGV, &runtimetesting.EmbeddedTest{})
 	s.AddKnownTypeWithName(embeddedTestExternalGVK, &runtimetesting.EmbeddedTestExternal{})
+	utilruntime.Must(runtimetesting.RegisterConversions(s))
 
 	original := &runtimetesting.EmbeddedTest{
 		ID: "outer",
@@ -243,12 +248,8 @@ func TestDeepCopyOfRuntimeObject(t *testing.T) {
 	}
 	t.Logf("originalRole = %v\n", string(originalData))
 
-	copyOfOriginal, err := s.DeepCopy(original)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	copiedData, err := runtime.Encode(codec, copyOfOriginal.(runtime.Object))
+	copyOfOriginal := original.DeepCopy()
+	copiedData, err := runtime.Encode(codec, copyOfOriginal)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}

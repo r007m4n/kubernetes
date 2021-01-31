@@ -1,4 +1,4 @@
-// +build linux
+// +build linux,!dockerless
 
 /*
 Copyright 2015 The Kubernetes Authors.
@@ -28,56 +28,56 @@ import (
 	"strings"
 
 	"github.com/blang/semver"
-	dockertypes "github.com/docker/engine-api/types"
-	dockercontainer "github.com/docker/engine-api/types/container"
-	"k8s.io/api/core/v1"
-	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/v1alpha1/runtime"
+	dockertypes "github.com/docker/docker/api/types"
+	dockercontainer "github.com/docker/docker/api/types/container"
+	v1 "k8s.io/api/core/v1"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
+// DefaultMemorySwap always returns 0 for no memory swap in a sandbox
 func DefaultMemorySwap() int64 {
 	return 0
 }
 
-func (ds *dockerService) getSecurityOpts(containerName string, sandboxConfig *runtimeapi.PodSandboxConfig, separator rune) ([]string, error) {
+func (ds *dockerService) getSecurityOpts(seccompProfile string, separator rune) ([]string, error) {
 	// Apply seccomp options.
-	seccompSecurityOpts, err := getSeccompSecurityOpts(containerName, sandboxConfig, ds.seccompProfileRoot, separator)
+	seccompSecurityOpts, err := getSeccompSecurityOpts(seccompProfile, separator)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate seccomp security options for container %q: %v", containerName, err)
+		return nil, fmt.Errorf("failed to generate seccomp security options for container: %v", err)
 	}
 
 	return seccompSecurityOpts, nil
 }
 
-func getSeccompDockerOpts(annotations map[string]string, ctrName, profileRoot string) ([]dockerOpt, error) {
-	profile, profileOK := annotations[v1.SeccompContainerAnnotationKeyPrefix+ctrName]
-	if !profileOK {
-		// try the pod profile
-		profile, profileOK = annotations[v1.SeccompPodAnnotationKey]
-		if !profileOK {
-			// return early the default
-			return defaultSeccompOpt, nil
-		}
-	}
+func (ds *dockerService) getSandBoxSecurityOpts(separator rune) []string {
+	// run sandbox with no-new-privileges and using runtime/default
+	// sending no "seccomp=" means docker will use default profile
+	return []string{"no-new-privileges"}
+}
 
-	if profile == "unconfined" {
+func getSeccompDockerOpts(seccompProfile string) ([]dockerOpt, error) {
+	if seccompProfile == "" || seccompProfile == v1.SeccompProfileNameUnconfined {
 		// return early the default
 		return defaultSeccompOpt, nil
 	}
 
-	if profile == "docker/default" {
+	if seccompProfile == v1.SeccompProfileRuntimeDefault || seccompProfile == v1.DeprecatedSeccompProfileDockerDefault {
 		// return nil so docker will load the default seccomp profile
 		return nil, nil
 	}
 
-	if !strings.HasPrefix(profile, "localhost/") {
-		return nil, fmt.Errorf("unknown seccomp profile option: %s", profile)
+	if !strings.HasPrefix(seccompProfile, v1.SeccompLocalhostProfileNamePrefix) {
+		return nil, fmt.Errorf("unknown seccomp profile option: %s", seccompProfile)
 	}
 
-	name := strings.TrimPrefix(profile, "localhost/") // by pod annotation validation, name is a valid subpath
-	fname := filepath.Join(profileRoot, filepath.FromSlash(name))
-	file, err := ioutil.ReadFile(fname)
+	// get the full path of seccomp profile when prefixed with 'localhost/'.
+	fname := strings.TrimPrefix(seccompProfile, v1.SeccompLocalhostProfileNamePrefix)
+	if !filepath.IsAbs(fname) {
+		return nil, fmt.Errorf("seccomp profile path must be absolute, but got relative path %q", fname)
+	}
+	file, err := ioutil.ReadFile(filepath.FromSlash(fname))
 	if err != nil {
-		return nil, fmt.Errorf("cannot load seccomp profile %q: %v", name, err)
+		return nil, fmt.Errorf("cannot load seccomp profile %q: %v", fname, err)
 	}
 
 	b := bytes.NewBuffer(nil)
@@ -85,16 +85,15 @@ func getSeccompDockerOpts(annotations map[string]string, ctrName, profileRoot st
 		return nil, err
 	}
 	// Rather than the full profile, just put the filename & md5sum in the event log.
-	msg := fmt.Sprintf("%s(md5:%x)", name, md5.Sum(file))
+	msg := fmt.Sprintf("%s(md5:%x)", fname, md5.Sum(file))
 
 	return []dockerOpt{{"seccomp", b.String(), msg}}, nil
 }
 
-// getSeccompSecurityOpts gets container seccomp options from container and sandbox
-// config, currently from sandbox annotations.
+// getSeccompSecurityOpts gets container seccomp options from container seccomp profile.
 // It is an experimental feature and may be promoted to official runtime api in the future.
-func getSeccompSecurityOpts(containerName string, sandboxConfig *runtimeapi.PodSandboxConfig, seccompProfileRoot string, separator rune) ([]string, error) {
-	seccompOpts, err := getSeccompDockerOpts(sandboxConfig.GetAnnotations(), containerName, seccompProfileRoot)
+func getSeccompSecurityOpts(seccompProfile string, separator rune) ([]string, error) {
+	seccompOpts, err := getSeccompDockerOpts(seccompProfile)
 	if err != nil {
 		return nil, err
 	}
@@ -113,11 +112,13 @@ func (ds *dockerService) updateCreateConfig(
 		rOpts := lc.GetResources()
 		if rOpts != nil {
 			createConfig.HostConfig.Resources = dockercontainer.Resources{
+				// Memory and MemorySwap are set to the same value, this prevents containers from using any swap.
 				Memory:     rOpts.MemoryLimitInBytes,
-				MemorySwap: DefaultMemorySwap(),
+				MemorySwap: rOpts.MemoryLimitInBytes,
 				CPUShares:  rOpts.CpuShares,
 				CPUQuota:   rOpts.CpuQuota,
 				CPUPeriod:  rOpts.CpuPeriod,
+				CpusetCpus: rOpts.CpusetCpus,
 			}
 			createConfig.HostConfig.OomScoreAdj = int(rOpts.OomScoreAdj)
 		}
@@ -127,7 +128,6 @@ func (ds *dockerService) updateCreateConfig(
 		if err := applyContainerSecurityContext(lc, podSandboxID, createConfig.Config, createConfig.HostConfig, securityOptSep); err != nil {
 			return fmt.Errorf("failed to apply container security context for container %q: %v", config.Metadata.Name, err)
 		}
-		modifyPIDNamespaceOverrides(ds.disableSharedPID, apiVersion, createConfig.HostConfig)
 	}
 
 	// Apply cgroupsParent derived from the sandbox config.
@@ -143,6 +143,18 @@ func (ds *dockerService) updateCreateConfig(
 	return nil
 }
 
-func (ds *dockerService) determinePodIPBySandboxID(uid string) string {
-	return ""
+func (ds *dockerService) determinePodIPBySandboxID(uid string) []string {
+	return nil
+}
+
+func getNetworkNamespace(c *dockertypes.ContainerJSON) (string, error) {
+	if c.State.Pid == 0 {
+		// Docker reports pid 0 for an exited container.
+		return "", fmt.Errorf("cannot find network namespace for the terminated container %q", c.ID)
+	}
+	return fmt.Sprintf(dockerNetNSFmt, c.State.Pid), nil
+}
+
+// applyExperimentalCreateConfig applys experimental configures from sandbox annotations.
+func applyExperimentalCreateConfig(createConfig *dockertypes.ContainerCreateConfig, annotations map[string]string) {
 }

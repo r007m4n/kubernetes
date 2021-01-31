@@ -19,9 +19,10 @@ package job
 import (
 	batch "k8s.io/api/batch/v1"
 	"k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// IsJobFinished checks whether the given Job has finished execution.
+// It does not discriminate between successful and failed terminations.
 func IsJobFinished(j *batch.Job) bool {
 	for _, c := range j.Status.Conditions {
 		if (c.Type == batch.JobComplete || c.Type == batch.JobFailed) && c.Status == v1.ConditionTrue {
@@ -29,17 +30,4 @@ func IsJobFinished(j *batch.Job) bool {
 		}
 	}
 	return false
-}
-
-func newControllerRef(j *batch.Job) *metav1.OwnerReference {
-	blockOwnerDeletion := true
-	isController := true
-	return &metav1.OwnerReference{
-		APIVersion:         controllerKind.GroupVersion().String(),
-		Kind:               controllerKind.Kind,
-		Name:               j.Name,
-		UID:                j.UID,
-		BlockOwnerDeletion: &blockOwnerDeletion,
-		Controller:         &isController,
-	}
 }

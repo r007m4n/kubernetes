@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2017 The Kubernetes Authors.
 #
@@ -18,60 +18,24 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-KUBE_ROOT=${GOPATH}/src/k8s.io/kubernetes
-BASE_PATH=k8s.io/kubernetes/staging/src/
-BASE_PKG=k8s.io/sample-apiserver
+SCRIPT_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
+CODEGEN_PKG=${CODEGEN_PKG:-$(cd "${SCRIPT_ROOT}"; ls -d -1 ./vendor/k8s.io/code-generator 2>/dev/null || echo ../code-generator)}
 
-source "${KUBE_ROOT}/hack/lib/init.sh"
+# generate the code with:
+# --output-base    because this script should also be able to run inside the vendor dir of
+#                  k8s.io/kubernetes. The output-base is needed for the generators to output into the vendor dir
+#                  instead of the $GOPATH directly. For normal projects this can be dropped.
+bash "${CODEGEN_PKG}/generate-groups.sh" all \
+  k8s.io/sample-apiserver/pkg/generated k8s.io/sample-apiserver/pkg/apis \
+  "wardle:v1alpha1,v1beta1" \
+  --output-base "$(dirname "${BASH_SOURCE[0]}")/../../.." \
+  --go-header-file "${SCRIPT_ROOT}"/hack/boilerplate.go.txt
 
-clientgen="${PWD}/client-gen-binary"
-listergen="${PWD}/lister-gen"
-informergen="${PWD}/informer-gen"
-# Register function to be called on EXIT to remove generated binary.
-function cleanup {
-  rm -f "${clientgen:-}"
-  rm -f "${listergen:-}"
-  rm -f "${informergen:-}"
-}
-trap cleanup EXIT
+bash "${CODEGEN_PKG}/generate-internal-groups.sh" "deepcopy,defaulter,conversion,openapi" \
+  k8s.io/sample-apiserver/pkg/generated k8s.io/sample-apiserver/pkg/apis k8s.io/sample-apiserver/pkg/apis \
+  "wardle:v1alpha1,v1beta1" \
+  --output-base "$(dirname "${BASH_SOURCE[0]}")/../../.." \
+  --go-header-file "${SCRIPT_ROOT}/hack/boilerplate.go.txt"
 
-function generate_group() {
-  local GROUP_NAME=$1
-  local VERSION=$2
-  local SERVER_BASE=${GOPATH}/src/${BASE_PATH}
-  local CLIENT_PKG=${BASE_PKG}/pkg/client
-  local LISTERS_PKG=${CLIENT_PKG}/listers_generated
-  local INFORMERS_PKG=${CLIENT_PKG}/informers_generated
-  local PREFIX=${BASE_PKG}/pkg/apis
-  local INPUT_APIS=(
-    ${GROUP_NAME}/
-    ${GROUP_NAME}/${VERSION}
-  )
-
-  echo "Building client-gen"
-  go build -o "${clientgen}" k8s.io/kubernetes/cmd/libs/go2idl/client-gen
-
-  echo "generating clientset for group ${GROUP_NAME} and version ${VERSION} at ${GOPATH}/${BASE_PATH}${CLIENT_PKG}"
-  ${clientgen} --input-base ${PREFIX} --input ${INPUT_APIS[@]} --clientset-path ${CLIENT_PKG}/clientset_generated --output-base=${GOPATH}/src/${BASE_PATH}
-  ${clientgen} --clientset-name="clientset" --input-base ${PREFIX} --input ${GROUP_NAME}/${VERSION} --clientset-path ${CLIENT_PKG}/clientset_generated --output-base=${GOPATH}/src/${BASE_PATH}
-  
-  echo "Building lister-gen"
-  go build -o "${listergen}" k8s.io/kubernetes/cmd/libs/go2idl/lister-gen
-
-  echo "generating listers for group ${GROUP_NAME} and version ${VERSION} at ${GOPATH}/${BASE_PATH}${LISTERS_PKG}"
-  ${listergen} --input-dirs ${BASE_PKG}/pkg/apis/wardle --input-dirs ${BASE_PKG}/pkg/apis/${GROUP_NAME}/${VERSION} --output-package ${LISTERS_PKG} --output-base ${SERVER_BASE}
-
-  echo "Building informer-gen"
-  go build -o "${informergen}" k8s.io/kubernetes/cmd/libs/go2idl/informer-gen
-
-  echo "generating informers for group ${GROUP_NAME} and version ${VERSION} at ${GOPATH}/${BASE_PATH}${INFORMERS_PKG}"
-  ${informergen} \
-    --input-dirs ${BASE_PKG}/pkg/apis/${GROUP_NAME} --input-dirs ${BASE_PKG}/pkg/apis/${GROUP_NAME}/${VERSION} \
-    --versioned-clientset-package ${CLIENT_PKG}/clientset_generated/clientset \
-    --internal-clientset-package ${CLIENT_PKG}/clientset_generated/internalclientset \
-    --listers-package ${LISTERS_PKG} \
-    --output-package ${INFORMERS_PKG} \
-    --output-base ${SERVER_BASE}
-}
-
-generate_group wardle v1alpha1
+# To use your own boilerplate text append:
+#   --go-header-file "${SCRIPT_ROOT}/hack/custom-boilerplate.go.txt"

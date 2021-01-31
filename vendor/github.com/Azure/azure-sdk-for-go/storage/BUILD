@@ -1,11 +1,4 @@
-package(default_visibility = ["//visibility:public"])
-
-licenses(["notice"])
-
-load(
-    "@io_bazel_rules_go//go:def.bzl",
-    "go_library",
-)
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "go_default_library",
@@ -17,6 +10,7 @@ go_library(
         "blobserviceclient.go",
         "blockblob.go",
         "client.go",
+        "commonsasuri.go",
         "container.go",
         "copyblob.go",
         "directory.go",
@@ -28,6 +22,7 @@ go_library(
         "odata.go",
         "pageblob.go",
         "queue.go",
+        "queuesasuri.go",
         "queueserviceclient.go",
         "share.go",
         "storagepolicy.go",
@@ -36,13 +31,15 @@ go_library(
         "table_batch.go",
         "tableserviceclient.go",
         "util.go",
-        "version.go",
     ],
-    tags = ["automanaged"],
+    importmap = "k8s.io/kubernetes/vendor/github.com/Azure/azure-sdk-for-go/storage",
+    importpath = "github.com/Azure/azure-sdk-for-go/storage",
+    visibility = ["//visibility:public"],
     deps = [
+        "//vendor/github.com/Azure/azure-sdk-for-go/version:go_default_library",
         "//vendor/github.com/Azure/go-autorest/autorest:go_default_library",
         "//vendor/github.com/Azure/go-autorest/autorest/azure:go_default_library",
-        "//vendor/github.com/satori/uuid:go_default_library",
+        "//vendor/github.com/satori/go.uuid:go_default_library",
     ],
 )
 
@@ -57,4 +54,5 @@ filegroup(
     name = "all-srcs",
     srcs = [":package-srcs"],
     tags = ["automanaged"],
+    visibility = ["//visibility:public"],
 )

@@ -17,22 +17,32 @@ limitations under the License.
 package kuberuntime
 
 import (
+	"fmt"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"k8s.io/api/core/v1"
-	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/v1alpha1/runtime"
+	v1 "k8s.io/api/core/v1"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
+	"k8s.io/kubernetes/pkg/features"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	containertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
+	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 )
 
 // TestRemoveContainer tests removing the container and its corresponding container logs.
 func TestRemoveContainer(t *testing.T) {
 	fakeRuntime, _, m, err := createTestRuntimeManager()
+	require.NoError(t, err)
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			UID:       "12345678",
@@ -54,17 +64,30 @@ func TestRemoveContainer(t *testing.T) {
 	_, fakeContainers := makeAndSetFakePod(t, m, fakeRuntime, pod)
 	assert.Equal(t, len(fakeContainers), 1)
 
-	containerId := fakeContainers[0].Id
+	containerID := fakeContainers[0].Id
 	fakeOS := m.osInterface.(*containertest.FakeOS)
-	err = m.removeContainer(containerId)
+	fakeOS.GlobFn = func(pattern, path string) bool {
+		pattern = strings.Replace(pattern, "*", ".*", -1)
+		return regexp.MustCompile(pattern).MatchString(path)
+	}
+	expectedContainerLogPath := filepath.Join(podLogsRootDirectory, "new_bar_12345678", "foo", "0.log")
+	expectedContainerLogPathRotated := filepath.Join(podLogsRootDirectory, "new_bar_12345678", "foo", "0.log.20060102-150405")
+	expectedContainerLogSymlink := legacyLogSymlink(containerID, "foo", "bar", "new")
+
+	fakeOS.Create(expectedContainerLogPath)
+	fakeOS.Create(expectedContainerLogPathRotated)
+
+	err = m.removeContainer(containerID)
 	assert.NoError(t, err)
-	// Verify container log is removed
-	expectedContainerLogPath := filepath.Join(podLogsRootDirectory, "12345678", "foo_0.log")
-	expectedContainerLogSymlink := legacyLogSymlink(containerId, "foo", "bar", "new")
-	assert.Equal(t, fakeOS.Removes, []string{expectedContainerLogPath, expectedContainerLogSymlink})
+
+	// Verify container log is removed.
+	// We could not predict the order of `fakeOS.Removes`, so we use `assert.ElementsMatch` here.
+	assert.ElementsMatch(t,
+		[]string{expectedContainerLogSymlink, expectedContainerLogPath, expectedContainerLogPathRotated},
+		fakeOS.Removes)
 	// Verify container is removed
 	assert.Contains(t, fakeRuntime.Called, "RemoveContainer")
-	containers, err := fakeRuntime.ListContainers(&runtimeapi.ContainerFilter{Id: containerId})
+	containers, err := fakeRuntime.ListContainers(&runtimeapi.ContainerFilter{Id: containerID})
 	assert.NoError(t, err)
 	assert.Empty(t, containers)
 }
@@ -119,7 +142,7 @@ func TestToKubeContainerStatus(t *testing.T) {
 
 	for desc, test := range map[string]struct {
 		input    *runtimeapi.ContainerStatus
-		expected *kubecontainer.ContainerStatus
+		expected *kubecontainer.Status
 	}{
 		"created container": {
 			input: &runtimeapi.ContainerStatus{
@@ -129,7 +152,7 @@ func TestToKubeContainerStatus(t *testing.T) {
 				State:     runtimeapi.ContainerState_CONTAINER_CREATED,
 				CreatedAt: createdAt,
 			},
-			expected: &kubecontainer.ContainerStatus{
+			expected: &kubecontainer.Status{
 				ID:        *cid,
 				Image:     imageSpec.Image,
 				State:     kubecontainer.ContainerStateCreated,
@@ -145,7 +168,7 @@ func TestToKubeContainerStatus(t *testing.T) {
 				CreatedAt: createdAt,
 				StartedAt: startedAt,
 			},
-			expected: &kubecontainer.ContainerStatus{
+			expected: &kubecontainer.Status{
 				ID:        *cid,
 				Image:     imageSpec.Image,
 				State:     kubecontainer.ContainerStateRunning,
@@ -166,7 +189,7 @@ func TestToKubeContainerStatus(t *testing.T) {
 				Reason:     "GotKilled",
 				Message:    "The container was killed",
 			},
-			expected: &kubecontainer.ContainerStatus{
+			expected: &kubecontainer.Status{
 				ID:         *cid,
 				Image:      imageSpec.Image,
 				State:      kubecontainer.ContainerStateExited,
@@ -187,7 +210,7 @@ func TestToKubeContainerStatus(t *testing.T) {
 				CreatedAt: createdAt,
 				StartedAt: startedAt,
 			},
-			expected: &kubecontainer.ContainerStatus{
+			expected: &kubecontainer.Status{
 				ID:        *cid,
 				Image:     imageSpec.Image,
 				State:     kubecontainer.ContainerStateUnknown,
@@ -201,91 +224,201 @@ func TestToKubeContainerStatus(t *testing.T) {
 	}
 }
 
-func makeExpetectedConfig(m *kubeGenericRuntimeManager, pod *v1.Pod, containerIndex int) *runtimeapi.ContainerConfig {
-	container := &pod.Spec.Containers[containerIndex]
-	podIP := ""
-	restartCount := 0
-	opts, _, _ := m.runtimeHelper.GenerateRunContainerOptions(pod, container, podIP)
-	containerLogsPath := buildContainerLogsPath(container.Name, restartCount)
-	restartCountUint32 := uint32(restartCount)
-	envs := make([]*runtimeapi.KeyValue, len(opts.Envs))
+func TestLifeCycleHook(t *testing.T) {
 
-	expectedConfig := &runtimeapi.ContainerConfig{
-		Metadata: &runtimeapi.ContainerMetadata{
-			Name:    container.Name,
-			Attempt: restartCountUint32,
-		},
-		Image:       &runtimeapi.ImageSpec{Image: container.Image},
-		Command:     container.Command,
-		Args:        []string(nil),
-		WorkingDir:  container.WorkingDir,
-		Labels:      newContainerLabels(container, pod),
-		Annotations: newContainerAnnotations(container, pod, restartCount),
-		Devices:     makeDevices(opts),
-		Mounts:      m.makeMounts(opts, container),
-		LogPath:     containerLogsPath,
-		Stdin:       container.Stdin,
-		StdinOnce:   container.StdinOnce,
-		Tty:         container.TTY,
-		Linux:       m.generateLinuxContainerConfig(container, pod, new(int64), ""),
-		Envs:        envs,
+	// Setup
+	fakeRuntime, _, m, _ := createTestRuntimeManager()
+
+	gracePeriod := int64(30)
+	cID := kubecontainer.ContainerID{
+		Type: "docker",
+		ID:   "foo",
 	}
-	return expectedConfig
+
+	testPod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bar",
+			Namespace: "default",
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:            "foo",
+					Image:           "busybox",
+					ImagePullPolicy: v1.PullIfNotPresent,
+					Command:         []string{"testCommand"},
+					WorkingDir:      "testWorkingDir",
+				},
+			},
+		},
+	}
+	cmdPostStart := &v1.Lifecycle{
+		PostStart: &v1.Handler{
+			Exec: &v1.ExecAction{
+				Command: []string{"PostStartCMD"},
+			},
+		},
+	}
+
+	httpLifeCycle := &v1.Lifecycle{
+		PreStop: &v1.Handler{
+			HTTPGet: &v1.HTTPGetAction{
+				Host: "testHost.com",
+				Path: "/GracefulExit",
+			},
+		},
+	}
+
+	cmdLifeCycle := &v1.Lifecycle{
+		PreStop: &v1.Handler{
+			Exec: &v1.ExecAction{
+				Command: []string{"PreStopCMD"},
+			},
+		},
+	}
+
+	fakeRunner := &containertest.FakeContainerCommandRunner{}
+	fakeHTTP := &fakeHTTP{}
+
+	lcHanlder := lifecycle.NewHandlerRunner(
+		fakeHTTP,
+		fakeRunner,
+		nil)
+
+	m.runner = lcHanlder
+
+	// Configured and works as expected
+	t.Run("PreStop-CMDExec", func(t *testing.T) {
+		testPod.Spec.Containers[0].Lifecycle = cmdLifeCycle
+		m.killContainer(testPod, cID, "foo", "testKill", &gracePeriod)
+		if fakeRunner.Cmd[0] != cmdLifeCycle.PreStop.Exec.Command[0] {
+			t.Errorf("CMD Prestop hook was not invoked")
+		}
+	})
+
+	// Configured and working HTTP hook
+	t.Run("PreStop-HTTPGet", func(t *testing.T) {
+		defer func() { fakeHTTP.url = "" }()
+		testPod.Spec.Containers[0].Lifecycle = httpLifeCycle
+		m.killContainer(testPod, cID, "foo", "testKill", &gracePeriod)
+
+		if !strings.Contains(fakeHTTP.url, httpLifeCycle.PreStop.HTTPGet.Host) {
+			t.Errorf("HTTP Prestop hook was not invoked")
+		}
+	})
+
+	// When there is no time to run PreStopHook
+	t.Run("PreStop-NoTimeToRun", func(t *testing.T) {
+		gracePeriodLocal := int64(0)
+
+		testPod.DeletionGracePeriodSeconds = &gracePeriodLocal
+		testPod.Spec.TerminationGracePeriodSeconds = &gracePeriodLocal
+
+		m.killContainer(testPod, cID, "foo", "testKill", &gracePeriodLocal)
+
+		if strings.Contains(fakeHTTP.url, httpLifeCycle.PreStop.HTTPGet.Host) {
+			t.Errorf("HTTP Should not execute when gracePeriod is 0")
+		}
+	})
+
+	// Post Start script
+	t.Run("PostStart-CmdExe", func(t *testing.T) {
+
+		// Fake all the things you need before trying to create a container
+		fakeSandBox, _ := makeAndSetFakePod(t, m, fakeRuntime, testPod)
+		fakeSandBoxConfig, _ := m.generatePodSandboxConfig(testPod, 0)
+		testPod.Spec.Containers[0].Lifecycle = cmdPostStart
+		testContainer := &testPod.Spec.Containers[0]
+		fakePodStatus := &kubecontainer.PodStatus{
+			ContainerStatuses: []*kubecontainer.Status{
+				{
+					ID: kubecontainer.ContainerID{
+						Type: "docker",
+						ID:   testContainer.Name,
+					},
+					Name:      testContainer.Name,
+					State:     kubecontainer.ContainerStateCreated,
+					CreatedAt: time.Unix(0, time.Now().Unix()),
+				},
+			},
+		}
+
+		// Now try to create a container, which should in turn invoke PostStart Hook
+		_, err := m.startContainer(fakeSandBox.Id, fakeSandBoxConfig, containerStartSpec(testContainer), testPod, fakePodStatus, nil, "", []string{})
+		if err != nil {
+			t.Errorf("startContainer error =%v", err)
+		}
+		if fakeRunner.Cmd[0] != cmdPostStart.PostStart.Exec.Command[0] {
+			t.Errorf("CMD PostStart hook was not invoked")
+		}
+	})
 }
 
-func TestGenerateContainerConfig(t *testing.T) {
-	_, _, m, err := createTestRuntimeManager()
-	assert.NoError(t, err)
-
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			UID:       "12345678",
-			Name:      "bar",
-			Namespace: "new",
-		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:            "foo",
-					Image:           "busybox",
-					ImagePullPolicy: v1.PullIfNotPresent,
-					Command:         []string{"testCommand"},
-					WorkingDir:      "testWorkingDir",
+func TestStartSpec(t *testing.T) {
+	podStatus := &kubecontainer.PodStatus{
+		ContainerStatuses: []*kubecontainer.Status{
+			{
+				ID: kubecontainer.ContainerID{
+					Type: "docker",
+					ID:   "docker-something-something",
 				},
+				Name: "target",
 			},
 		},
 	}
 
-	expectedConfig := makeExpetectedConfig(m, pod, 0)
-	containerConfig, err := m.generateContainerConfig(&pod.Spec.Containers[0], pod, 0, "", pod.Spec.Containers[0].Image)
-	assert.NoError(t, err)
-	assert.Equal(t, expectedConfig, containerConfig, "generate container config for kubelet runtime v1.")
-
-	runAsUser := int64(0)
-	runAsNonRootTrue := true
-	podWithContainerSecurityContext := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			UID:       "12345678",
-			Name:      "bar",
-			Namespace: "new",
+	for _, tc := range []struct {
+		name string
+		spec *startSpec
+		want *kubecontainer.ContainerID
+	}{
+		{
+			"Regular Container",
+			containerStartSpec(&v1.Container{
+				Name: "test",
+			}),
+			nil,
 		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:            "foo",
-					Image:           "busybox",
-					ImagePullPolicy: v1.PullIfNotPresent,
-					Command:         []string{"testCommand"},
-					WorkingDir:      "testWorkingDir",
-					SecurityContext: &v1.SecurityContext{
-						RunAsNonRoot: &runAsNonRootTrue,
-						RunAsUser:    &runAsUser,
-					},
+		{
+			"Ephemeral Container w/o Target",
+			ephemeralContainerStartSpec(&v1.EphemeralContainer{
+				EphemeralContainerCommon: v1.EphemeralContainerCommon{
+					Name: "test",
 				},
+			}),
+			nil,
+		},
+		{
+			"Ephemeral Container w/ Target",
+			ephemeralContainerStartSpec(&v1.EphemeralContainer{
+				EphemeralContainerCommon: v1.EphemeralContainerCommon{
+					Name: "test",
+				},
+				TargetContainerName: "target",
+			}),
+			&kubecontainer.ContainerID{
+				Type: "docker",
+				ID:   "docker-something-something",
 			},
 		},
-	}
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.EphemeralContainers, true)()
+			if got, err := tc.spec.getTargetID(podStatus); err != nil {
+				t.Fatalf("%v: getTargetID got unexpected error: %v", t.Name(), err)
+			} else if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("%v: getTargetID got unexpected result. diff:\n%v", t.Name(), diff)
+			}
+		})
 
-	_, err = m.generateContainerConfig(&podWithContainerSecurityContext.Spec.Containers[0], podWithContainerSecurityContext, 0, "", podWithContainerSecurityContext.Spec.Containers[0].Image)
-	assert.Error(t, err)
+		// Test with feature disabled in self-contained section which can be removed when feature flag is removed.
+		t.Run(fmt.Sprintf("%s (disabled)", tc.name), func(t *testing.T) {
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.EphemeralContainers, false)()
+			if got, err := tc.spec.getTargetID(podStatus); err != nil {
+				t.Fatalf("%v: getTargetID got unexpected error: %v", t.Name(), err)
+			} else if got != nil {
+				t.Errorf("%v: getTargetID got: %v, wanted nil", t.Name(), got)
+			}
+		})
+	}
 }

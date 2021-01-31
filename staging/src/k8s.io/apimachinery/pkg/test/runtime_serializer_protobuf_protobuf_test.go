@@ -24,9 +24,11 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	"github.com/stretchr/testify/require"
+
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/testapigroup/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer/protobuf"
@@ -40,6 +42,9 @@ type testObject struct {
 func (d *testObject) GetObjectKind() schema.ObjectKind                { return d }
 func (d *testObject) SetGroupVersionKind(gvk schema.GroupVersionKind) { d.gvk = gvk }
 func (d *testObject) GroupVersionKind() schema.GroupVersionKind       { return d.gvk }
+func (d *testObject) DeepCopyObject() runtime.Object {
+	panic("testObject does not support DeepCopy")
+}
 
 type testMarshalable struct {
 	testObject
@@ -49,6 +54,10 @@ type testMarshalable struct {
 
 func (d *testMarshalable) Marshal() ([]byte, error) {
 	return d.data, d.err
+}
+
+func (d *testMarshalable) DeepCopyObject() runtime.Object {
+	panic("testMarshalable does not support DeepCopy")
 }
 
 type testBufferedMarshalable struct {
@@ -70,8 +79,12 @@ func (d *testBufferedMarshalable) Size() int {
 	return len(d.data)
 }
 
+func (d *testBufferedMarshalable) DeepCopyObject() runtime.Object {
+	panic("testBufferedMarshalable does not support DeepCopy")
+}
+
 func TestRecognize(t *testing.T) {
-	s := protobuf.NewSerializer(nil, nil, "application/protobuf")
+	s := protobuf.NewSerializer(nil, nil)
 	ignores := [][]byte{
 		nil,
 		{},
@@ -159,7 +172,7 @@ func TestEncode(t *testing.T) {
 	}
 
 	for i, test := range testCases {
-		s := protobuf.NewSerializer(nil, nil, "application/protobuf")
+		s := protobuf.NewSerializer(nil, nil)
 		data, err := runtime.Encode(s, test.obj)
 
 		switch {
@@ -210,8 +223,6 @@ func TestProtobufDecode(t *testing.T) {
 		0x22, 0x00, // content-encoding
 	}
 
-	//err1 := fmt.Errorf("a test error")
-
 	testCases := []struct {
 		obj   runtime.Object
 		data  []byte
@@ -238,7 +249,7 @@ func TestProtobufDecode(t *testing.T) {
 					Kind:       "test",
 				},
 				// content type is set because the prefix matches the content
-				ContentType: "application/protobuf",
+				ContentType: runtime.ContentTypeProtobuf,
 				Raw:         []byte{0x6b, 0x38, 0x73, 0x00, 0x01, 0x02, 0x03},
 			},
 			data: wire2,
@@ -246,7 +257,7 @@ func TestProtobufDecode(t *testing.T) {
 	}
 
 	for i, test := range testCases {
-		s := protobuf.NewSerializer(nil, nil, "application/protobuf")
+		s := protobuf.NewSerializer(nil, nil)
 		unk := &runtime.Unknown{}
 		err := runtime.DecodeInto(s, test.data, unk)
 
@@ -272,16 +283,12 @@ func TestProtobufDecode(t *testing.T) {
 }
 
 func TestDecodeObjects(t *testing.T) {
-	obj1 := &v1.Pod{
+	obj1 := &v1.Carp{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "cool",
 		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name: "test",
-				},
-			},
+		Spec: v1.CarpSpec{
+			Hostname: "coolhost",
 		},
 	}
 	obj1wire, err := obj1.Marshal()
@@ -290,7 +297,7 @@ func TestDecodeObjects(t *testing.T) {
 	}
 
 	wire1, err := (&runtime.Unknown{
-		TypeMeta: runtime.TypeMeta{Kind: "Pod", APIVersion: "v1"},
+		TypeMeta: runtime.TypeMeta{Kind: "Carp", APIVersion: "v1"},
 		Raw:      obj1wire,
 	}).Marshal()
 	if err != nil {
@@ -298,7 +305,7 @@ func TestDecodeObjects(t *testing.T) {
 	}
 
 	unk2 := &runtime.Unknown{
-		TypeMeta: runtime.TypeMeta{Kind: "Pod", APIVersion: "v1"},
+		TypeMeta: runtime.TypeMeta{Kind: "Carp", APIVersion: "v1"},
 	}
 	wire2 := make([]byte, len(wire1)*2)
 	n, err := unk2.NestedMarshalTo(wire2, obj1, uint64(obj1.Size()))
@@ -311,21 +318,23 @@ func TestDecodeObjects(t *testing.T) {
 
 	wire1 = append([]byte{0x6b, 0x38, 0x73, 0x00}, wire1...)
 
+	obj1WithKind := obj1.DeepCopyObject()
+	obj1WithKind.GetObjectKind().SetGroupVersionKind(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Carp"})
 	testCases := []struct {
 		obj   runtime.Object
 		data  []byte
 		errFn func(error) bool
 	}{
 		{
-			obj:  obj1,
+			obj:  obj1WithKind,
 			data: wire1,
 		},
 	}
 	scheme := runtime.NewScheme()
 	for i, test := range testCases {
-		scheme.AddKnownTypes(schema.GroupVersion{Version: "v1"}, &v1.Pod{})
-		v1.AddToScheme(scheme)
-		s := protobuf.NewSerializer(scheme, scheme, "application/protobuf")
+		scheme.AddKnownTypes(schema.GroupVersion{Version: "v1"}, &v1.Carp{})
+		require.NoError(t, v1.AddToScheme(scheme))
+		s := protobuf.NewSerializer(scheme, scheme)
 		obj, err := runtime.Decode(s, test.data)
 
 		switch {

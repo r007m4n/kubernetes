@@ -20,13 +20,14 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/google/gofuzz"
-
+	fuzz "github.com/google/gofuzz"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metafuzzer "k8s.io/apimachinery/pkg/apis/meta/fuzzer"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/testapigroup"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -191,31 +192,37 @@ func TestGenericTypeMeta(t *testing.T) {
 }
 
 type InternalTypeMeta struct {
-	Kind              string                  `json:"kind,omitempty"`
-	Namespace         string                  `json:"namespace,omitempty"`
-	Name              string                  `json:"name,omitempty"`
-	GenerateName      string                  `json:"generateName,omitempty"`
-	UID               string                  `json:"uid,omitempty"`
-	CreationTimestamp metav1.Time             `json:"creationTimestamp,omitempty"`
-	SelfLink          string                  `json:"selfLink,omitempty"`
-	ResourceVersion   string                  `json:"resourceVersion,omitempty"`
-	APIVersion        string                  `json:"apiVersion,omitempty"`
-	Labels            map[string]string       `json:"labels,omitempty"`
-	Annotations       map[string]string       `json:"annotations,omitempty"`
-	Finalizers        []string                `json:"finalizers,omitempty"`
-	OwnerReferences   []metav1.OwnerReference `json:"ownerReferences,omitempty"`
+	Kind               string                  `json:"kind,omitempty"`
+	Namespace          string                  `json:"namespace,omitempty"`
+	Name               string                  `json:"name,omitempty"`
+	GenerateName       string                  `json:"generateName,omitempty"`
+	UID                string                  `json:"uid,omitempty"`
+	CreationTimestamp  metav1.Time             `json:"creationTimestamp,omitempty"`
+	SelfLink           string                  `json:"selfLink,omitempty"`
+	ResourceVersion    string                  `json:"resourceVersion,omitempty"`
+	Continue           string                  `json:"next,omitempty"`
+	RemainingItemCount *int64                  `json:"remainingItemCount,omitempty"`
+	APIVersion         string                  `json:"apiVersion,omitempty"`
+	Labels             map[string]string       `json:"labels,omitempty"`
+	Annotations        map[string]string       `json:"annotations,omitempty"`
+	Finalizers         []string                `json:"finalizers,omitempty"`
+	OwnerReferences    []metav1.OwnerReference `json:"ownerReferences,omitempty"`
 }
 
-func (m *InternalTypeMeta) GetResourceVersion() string   { return m.ResourceVersion }
-func (m *InternalTypeMeta) SetResourceVersion(rv string) { m.ResourceVersion = rv }
-func (m *InternalTypeMeta) GetSelfLink() string          { return m.SelfLink }
-func (m *InternalTypeMeta) SetSelfLink(link string)      { m.SelfLink = link }
+func (m *InternalTypeMeta) GetResourceVersion() string     { return m.ResourceVersion }
+func (m *InternalTypeMeta) SetResourceVersion(rv string)   { m.ResourceVersion = rv }
+func (m *InternalTypeMeta) GetSelfLink() string            { return m.SelfLink }
+func (m *InternalTypeMeta) SetSelfLink(link string)        { m.SelfLink = link }
+func (m *InternalTypeMeta) GetContinue() string            { return m.Continue }
+func (m *InternalTypeMeta) SetContinue(c string)           { m.Continue = c }
+func (m *InternalTypeMeta) GetRemainingItemCount() *int64  { return m.RemainingItemCount }
+func (m *InternalTypeMeta) SetRemainingItemCount(c *int64) { m.RemainingItemCount = c }
 
 type MyAPIObject struct {
 	TypeMeta InternalTypeMeta `json:",inline"`
 }
 
-func (obj *MyAPIObject) GetListMeta() metav1.List { return &obj.TypeMeta }
+func (obj *MyAPIObject) GetListMeta() metav1.ListInterface { return &obj.TypeMeta }
 
 func (obj *MyAPIObject) GetObjectKind() schema.ObjectKind { return obj }
 func (obj *MyAPIObject) SetGroupVersionKind(gvk schema.GroupVersionKind) {
@@ -224,11 +231,17 @@ func (obj *MyAPIObject) SetGroupVersionKind(gvk schema.GroupVersionKind) {
 func (obj *MyAPIObject) GroupVersionKind() schema.GroupVersionKind {
 	return schema.FromAPIVersionAndKind(obj.TypeMeta.APIVersion, obj.TypeMeta.Kind)
 }
+func (obj *MyAPIObject) DeepCopyObject() runtime.Object {
+	panic("MyAPIObject does not support DeepCopy")
+}
 
 type MyIncorrectlyMarkedAsAPIObject struct{}
 
 func (obj *MyIncorrectlyMarkedAsAPIObject) GetObjectKind() schema.ObjectKind {
 	return schema.EmptyObjectKind
+}
+func (obj *MyIncorrectlyMarkedAsAPIObject) DeepCopyObject() runtime.Object {
+	panic("MyIncorrectlyMarkedAsAPIObject does not support DeepCopy")
 }
 
 func TestResourceVersionerOfAPI(t *testing.T) {
@@ -336,7 +349,9 @@ type MyAPIObject2 struct {
 }
 
 func getObjectMetaAndOwnerReferences() (myAPIObject2 MyAPIObject2, metaOwnerReferences []metav1.OwnerReference) {
-	fuzz.New().NilChance(.5).NumElements(1, 5).Fuzz(&myAPIObject2)
+	scheme := runtime.NewScheme()
+	codecs := serializer.NewCodecFactory(scheme)
+	fuzz.New().NilChance(.5).NumElements(1, 5).Funcs(metafuzzer.Funcs(codecs)...).MaxDepth(10).Fuzz(&myAPIObject2)
 	references := myAPIObject2.ObjectMeta.OwnerReferences
 	// This is necessary for the test to pass because the getter will return a
 	// non-nil slice.

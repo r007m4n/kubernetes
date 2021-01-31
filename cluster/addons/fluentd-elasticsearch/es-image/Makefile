@@ -12,20 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY:	elasticsearch_logging_discovery build push
+.PHONY:	build push
 
-# The current value of the tag to be used for building and
-# pushing an image to gcr.io
-TAG = v5.4.0-1
+PREFIX = quay.io/fluentd_elasticsearch
+IMAGE = elasticsearch
+TAG = v7.4.3
 
-build:	elasticsearch_logging_discovery
-	docker build --pull -t gcr.io/google_containers/elasticsearch:$(TAG) .
+build:
+	docker build --tag ${PREFIX}/${IMAGE}:${TAG} .
+	docker build --tag ${PREFIX}/${IMAGE}:latest .
 
 push:
-	gcloud docker -- push gcr.io/google_containers/elasticsearch:$(TAG)
-
-elasticsearch_logging_discovery:
-	CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-w" elasticsearch_logging_discovery.go
-
-clean:
-	rm elasticsearch_logging_discovery
+	docker push ${PREFIX}/${IMAGE}:${TAG}
+	docker push ${PREFIX}/${IMAGE}:latest

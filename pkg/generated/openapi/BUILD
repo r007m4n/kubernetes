@@ -1,57 +1,25 @@
 package(default_visibility = ["//visibility:public"])
 
-load("//pkg/generated/openapi:def.bzl", "openapi_library")
+load("//build:code_generation.bzl", "gen_openapi", "openapi_deps")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
-licenses(["notice"])
+gen_openapi(
+    outs = ["zz_generated.openapi.go"],
+    exclude_pkgs = [
+        "staging/src/k8s.io/code-generator",
+        "staging/src/k8s.io/sample-apiserver",
+    ],
+    output_pkg = "k8s.io/kubernetes/pkg/generated/openapi",
+)
 
-openapi_library(
+go_library(
     name = "go_default_library",
-    srcs = ["doc.go"],
-    openapi_targets = [
-        "cmd/libs/go2idl/client-gen/test_apis/testgroup/v1",
-        "federation/apis/federation/v1beta1",
-        "pkg/apis/abac/v0",
-        "pkg/apis/abac/v1beta1",
-        "pkg/apis/admission/v1alpha1",
-        "pkg/apis/componentconfig/v1alpha1",
-        "pkg/version",
+    srcs = [
+        "doc.go",
+        "zz_generated.openapi.go",
     ],
-    tags = ["automanaged"],
-    vendor_targets = [
-        "k8s.io/api/admissionregistration/v1alpha1",
-        "k8s.io/api/apps/v1beta1",
-        "k8s.io/api/authentication/v1",
-        "k8s.io/api/authentication/v1beta1",
-        "k8s.io/api/authorization/v1",
-        "k8s.io/api/authorization/v1beta1",
-        "k8s.io/api/autoscaling/v1",
-        "k8s.io/api/autoscaling/v2alpha1",
-        "k8s.io/api/batch/v1",
-        "k8s.io/api/batch/v2alpha1",
-        "k8s.io/api/certificates/v1beta1",
-        "k8s.io/api/core/v1",
-        "k8s.io/api/extensions/v1beta1",
-        "k8s.io/api/imagepolicy/v1alpha1",
-        "k8s.io/api/networking/v1",
-        "k8s.io/api/policy/v1beta1",
-        "k8s.io/api/rbac/v1alpha1",
-        "k8s.io/api/rbac/v1beta1",
-        "k8s.io/api/settings/v1alpha1",
-        "k8s.io/api/storage/v1",
-        "k8s.io/api/storage/v1beta1",
-        "k8s.io/apimachinery/pkg/api/resource",
-        "k8s.io/apimachinery/pkg/apis/meta/v1",
-        "k8s.io/apimachinery/pkg/apis/meta/v1alpha1",
-        "k8s.io/apimachinery/pkg/apis/testapigroup/v1",
-        "k8s.io/apimachinery/pkg/runtime",
-        "k8s.io/apimachinery/pkg/util/intstr",
-        "k8s.io/apimachinery/pkg/version",
-        "k8s.io/apiserver/pkg/apis/audit/v1alpha1",
-        "k8s.io/apiserver/pkg/apis/example/v1",
-        "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1beta1",
-        "k8s.io/metrics/pkg/apis/custom_metrics/v1alpha1",
-        "k8s.io/metrics/pkg/apis/metrics/v1alpha1",
-    ],
+    importpath = "k8s.io/kubernetes/pkg/generated/openapi",
+    deps = openapi_deps(),  # keep
 )
 
 filegroup(
@@ -65,4 +33,15 @@ filegroup(
     name = "all-srcs",
     srcs = [":package-srcs"],
     tags = ["automanaged"],
+)
+
+go_test(
+    name = "go_default_test",
+    srcs = ["openapi_test.go"],
+    embed = [":go_default_library"],
+    deps = [
+        "//staging/src/k8s.io/apimachinery/pkg/util/diff:go_default_library",
+        "//vendor/github.com/go-openapi/spec:go_default_library",
+        "//vendor/k8s.io/kube-openapi/pkg/handler:go_default_library",
+    ],
 )

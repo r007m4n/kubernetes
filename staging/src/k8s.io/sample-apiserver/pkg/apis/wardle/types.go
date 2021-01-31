@@ -18,6 +18,8 @@ package wardle
 
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // FlunderList is a list of Flunder objects.
 type FlunderList struct {
 	metav1.TypeMeta
@@ -26,14 +28,34 @@ type FlunderList struct {
 	Items []Flunder
 }
 
+// ReferenceType defines the type of an object reference.
+type ReferenceType string
+
+const (
+	// FlunderReferenceType is used for Flunder references.
+	FlunderReferenceType = ReferenceType("Flunder")
+	// FischerReferenceType is used for Fischer references.
+	FischerReferenceType = ReferenceType("Fischer")
+)
+
+// FlunderSpec is the specification of a Flunder.
 type FlunderSpec struct {
+	// A name of another flunder, mutually exclusive to the FischerReference.
+	FlunderReference string
+	// A name of a fischer, mutually exclusive to the FlunderReference.
+	FischerReference string
+	// The reference type.
+	ReferenceType ReferenceType
 }
 
+// FlunderStatus is the status of a Flunder.
 type FlunderStatus struct {
 }
 
-// +genclient=true
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
+// Flunder is an example type with a spec and a status.
 type Flunder struct {
 	metav1.TypeMeta
 	metav1.ObjectMeta
@@ -42,9 +64,11 @@ type Flunder struct {
 	Status FlunderStatus
 }
 
-// +genclient=true
-// +nonNamespaced=true
+// +genclient
+// +genclient:nonNamespaced
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
+// Fischer is an example type with a list of disallowed Flunder.Names
 type Fischer struct {
 	metav1.TypeMeta
 	metav1.ObjectMeta
@@ -53,7 +77,8 @@ type Fischer struct {
 	DisallowedFlunders []string
 }
 
-// +nonNamespaced=true
+// +genclient:nonNamespaced
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // FischerList is a list of Fischer objects.
 type FischerList struct {

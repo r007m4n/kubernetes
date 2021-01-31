@@ -18,8 +18,9 @@ package net
 
 import (
 	"fmt"
-	"io"
+	"io/ioutil"
 	"net"
+	"os"
 	"strings"
 	"testing"
 )
@@ -67,10 +68,30 @@ docker0	000011AC	00000000	0001	0	0	0	0000FFFF	0	0	0
 virbr0	007AA8C0	00000000	0001	0	0	0	00FFFFFF	0	0	0
 `
 
-// Based on DigitalOcean COREOS
-const gatewayfirstLinkLocal = `Iface   Destination     Gateway         Flags   RefCnt  Use     Metric  Mask            MTU     Window  IRTT                                                       
-eth0    00000000        0120372D        0001    0       0       0       00000000        0       0       0                                                                               
-eth0    00000000        00000000        0001    0       0       2048    00000000        0       0       0                                                                            
+const v6gatewayfirst = `00000000000000000000000000000000 00 00000000000000000000000000000000 00 20010001000000000000000000000001 00000064 00000000 00000000 00000003 eth3
+20010002000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001 eth3
+00000000000000000000000000000000 60 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00200200       lo
+`
+const v6gatewaylast = `20010002000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001 eth3
+00000000000000000000000000000000 60 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00200200       lo
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 20010001000000000000000000000001 00000064 00000000 00000000 00000003 eth3
+`
+const v6gatewaymiddle = `20010002000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001 eth3
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 20010001000000000000000000000001 00000064 00000000 00000000 00000003 eth3
+00000000000000000000000000000000 60 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00200200       lo
+`
+const v6noDefaultRoutes = `00000000000000000000000000000000 60 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00200200       lo
+20010001000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00000001  docker0
+20010002000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001   eth3
+fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001   eth3
+`
+const v6nothing = ``
+const v6badDestination = `2001000200000000 7a 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00200200       lo
+`
+const v6badGateway = `00000000000000000000000000000000 00 00000000000000000000000000000000 00 200100010000000000000000000000000012 00000064 00000000 00000000 00000003 eth3
+`
+const v6route_Invalidhex = `000000000000000000000000000000000 00 00000000000000000000000000000000 00 fe80000000000000021fcafffea0ec00 00000064 00000000 00000000 00000003 enp1s0f0
+
 `
 
 const (
@@ -98,10 +119,18 @@ var (
 )
 
 var (
-	ipv4Route = Route{Interface: "eth3", Gateway: net.ParseIP("10.254.0.1")}
+	ipv4Route = Route{Interface: "eth3", Destination: net.ParseIP("0.0.0.0"), Gateway: net.ParseIP("10.254.0.1"), Family: familyIPv4}
+	ipv6Route = Route{Interface: "eth3", Destination: net.ParseIP("::"), Gateway: net.ParseIP("2001:1::1"), Family: familyIPv6}
 )
 
-func TestGetRoutes(t *testing.T) {
+var (
+	noRoutes   = []Route{}
+	routeV4    = []Route{ipv4Route}
+	routeV6    = []Route{ipv6Route}
+	bothRoutes = []Route{ipv4Route, ipv6Route}
+)
+
+func TestGetIPv4Routes(t *testing.T) {
 	testCases := []struct {
 		tcase      string
 		route      string
@@ -120,7 +149,7 @@ func TestGetRoutes(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		r := strings.NewReader(tc.route)
-		routes, err := getRoutes(r)
+		routes, err := getIPv4DefaultRoutes(r)
 		if err != nil {
 			if !strings.Contains(err.Error(), tc.errStrFrag) {
 				t.Errorf("case[%s]: Error string %q does not contain %q", tc.tcase, err, tc.errStrFrag)
@@ -130,8 +159,55 @@ func TestGetRoutes(t *testing.T) {
 		} else {
 			if tc.count != len(routes) {
 				t.Errorf("case[%s]: expected %d routes, have %v", tc.tcase, tc.count, routes)
-			} else if tc.count == 1 && !tc.expected.Gateway.Equal(routes[0].Gateway) {
-				t.Errorf("case[%s]: expected %v, got %v .err : %v", tc.tcase, tc.expected, routes, err)
+			} else if tc.count == 1 {
+				if !tc.expected.Gateway.Equal(routes[0].Gateway) {
+					t.Errorf("case[%s]: expected %v, got %v .err : %v", tc.tcase, tc.expected, routes, err)
+				}
+				if !routes[0].Destination.Equal(net.IPv4zero) {
+					t.Errorf("case[%s}: destination is not for default route (not zero)", tc.tcase)
+				}
+
+			}
+		}
+	}
+}
+
+func TestGetIPv6Routes(t *testing.T) {
+	testCases := []struct {
+		tcase      string
+		route      string
+		count      int
+		expected   *Route
+		errStrFrag string
+	}{
+		{"v6 gatewayfirst", v6gatewayfirst, 1, &ipv6Route, ""},
+		{"v6 gatewaymiddle", v6gatewaymiddle, 1, &ipv6Route, ""},
+		{"v6 gatewaylast", v6gatewaylast, 1, &ipv6Route, ""},
+		{"v6 no routes", v6nothing, 0, nil, ""},
+		{"v6 badDestination", v6badDestination, 0, nil, "invalid IPv6"},
+		{"v6 badGateway", v6badGateway, 0, nil, "invalid IPv6"},
+		{"v6 route_Invalidhex", v6route_Invalidhex, 0, nil, "odd length hex string"},
+		{"v6 no default routes", v6noDefaultRoutes, 0, nil, ""},
+	}
+	for _, tc := range testCases {
+		r := strings.NewReader(tc.route)
+		routes, err := getIPv6DefaultRoutes(r)
+		if err != nil {
+			if !strings.Contains(err.Error(), tc.errStrFrag) {
+				t.Errorf("case[%s]: Error string %q does not contain %q", tc.tcase, err, tc.errStrFrag)
+			}
+		} else if tc.errStrFrag != "" {
+			t.Errorf("case[%s]: Error %q expected, but not seen", tc.tcase, tc.errStrFrag)
+		} else {
+			if tc.count != len(routes) {
+				t.Errorf("case[%s]: expected %d routes, have %v", tc.tcase, tc.count, routes)
+			} else if tc.count == 1 {
+				if !tc.expected.Gateway.Equal(routes[0].Gateway) {
+					t.Errorf("case[%s]: expected %v, got %v .err : %v", tc.tcase, tc.expected, routes, err)
+				}
+				if !routes[0].Destination.Equal(net.IPv6zero) {
+					t.Errorf("case[%s}: destination is not for default route (not zero)", tc.tcase)
+				}
 			}
 		}
 	}
@@ -141,19 +217,23 @@ func TestParseIP(t *testing.T) {
 	testCases := []struct {
 		tcase    string
 		ip       string
+		family   AddressFamily
 		success  bool
 		expected net.IP
 	}{
-		{"empty", "", false, nil},
-		{"too short", "AA", false, nil},
-		{"too long", "0011223344", false, nil},
-		{"invalid", "invalid!", false, nil},
-		{"zero", "00000000", true, net.IP{0, 0, 0, 0}},
-		{"ffff", "FFFFFFFF", true, net.IP{0xff, 0xff, 0xff, 0xff}},
-		{"valid", "12345678", true, net.IP{120, 86, 52, 18}},
+		{"empty", "", familyIPv4, false, nil},
+		{"too short", "AA", familyIPv4, false, nil},
+		{"too long", "0011223344", familyIPv4, false, nil},
+		{"invalid", "invalid!", familyIPv4, false, nil},
+		{"zero", "00000000", familyIPv4, true, net.IP{0, 0, 0, 0}},
+		{"ffff", "FFFFFFFF", familyIPv4, true, net.IP{0xff, 0xff, 0xff, 0xff}},
+		{"valid v4", "12345678", familyIPv4, true, net.IP{120, 86, 52, 18}},
+		{"valid v6", "fe800000000000000000000000000000", familyIPv6, true, net.IP{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+		{"v6 too short", "fe80000000000000021fcafffea0ec0", familyIPv6, false, nil},
+		{"v6 too long", "fe80000000000000021fcafffea0ec002", familyIPv6, false, nil},
 	}
 	for _, tc := range testCases {
-		ip, err := parseHexToIPv4(tc.ip)
+		ip, err := parseIP(tc.ip, tc.family)
 		if !ip.Equal(tc.expected) {
 			t.Errorf("case[%v]: expected %q, got %q . err : %v", tc.tcase, tc.expected, ip, err)
 		}
@@ -241,6 +321,23 @@ func (_ validNetworkInterface) Addrs(intf *net.Interface) ([]net.Addr, error) {
 	return ifat, nil
 }
 func (_ validNetworkInterface) Interfaces() ([]net.Interface, error) {
+	return []net.Interface{upIntf}, nil
+}
+
+// Both IPv4 and IPv6 addresses (expecting IPv4 to be used)
+type v4v6NetworkInterface struct {
+}
+
+func (_ v4v6NetworkInterface) InterfaceByName(intfName string) (*net.Interface, error) {
+	return &upIntf, nil
+}
+func (_ v4v6NetworkInterface) Addrs(intf *net.Interface) ([]net.Addr, error) {
+	var ifat []net.Addr
+	ifat = []net.Addr{
+		addrStruct{val: "2001::10/64"}, addrStruct{val: "10.254.71.145/17"}}
+	return ifat, nil
+}
+func (_ v4v6NetworkInterface) Interfaces() ([]net.Interface, error) {
 	return []net.Interface{upIntf}, nil
 }
 
@@ -356,6 +453,55 @@ func (_ p2pNetworkInterface) Interfaces() ([]net.Interface, error) {
 	return []net.Interface{p2pIntf}, nil
 }
 
+// Interface with link locals and loopback interface with global addresses
+type linkLocalLoopbackNetworkInterface struct {
+}
+
+func (_ linkLocalLoopbackNetworkInterface) InterfaceByName(intfName string) (*net.Interface, error) {
+	if intfName == LoopbackInterfaceName {
+		return &loopbackIntf, nil
+	}
+	return &upIntf, nil
+}
+func (_ linkLocalLoopbackNetworkInterface) Addrs(intf *net.Interface) ([]net.Addr, error) {
+	var ifat []net.Addr
+	ifat = []net.Addr{addrStruct{val: "169.254.162.166/16"}, addrStruct{val: "fe80::200/10"}}
+	if intf.Name == LoopbackInterfaceName {
+		ifat = []net.Addr{addrStruct{val: "::1/128"}, addrStruct{val: "127.0.0.1/8"},
+			// global addresses on loopback interface
+			addrStruct{val: "10.1.1.1/32"}, addrStruct{val: "fd00:1:1::1/128"}}
+	}
+	return ifat, nil
+}
+func (_ linkLocalLoopbackNetworkInterface) Interfaces() ([]net.Interface, error) {
+	return []net.Interface{upIntf, loopbackIntf}, nil
+}
+
+// Interface and loopback interface with global addresses
+type globalsNetworkInterface struct {
+}
+
+func (_ globalsNetworkInterface) InterfaceByName(intfName string) (*net.Interface, error) {
+	if intfName == LoopbackInterfaceName {
+		return &loopbackIntf, nil
+	}
+	return &upIntf, nil
+}
+func (_ globalsNetworkInterface) Addrs(intf *net.Interface) ([]net.Addr, error) {
+	var ifat []net.Addr
+	ifat = []net.Addr{addrStruct{val: "169.254.162.166/16"}, addrStruct{val: "fe80::200/10"},
+		addrStruct{val: "192.168.1.1/31"}, addrStruct{val: "fd00::200/127"}}
+	if intf.Name == LoopbackInterfaceName {
+		ifat = []net.Addr{addrStruct{val: "::1/128"}, addrStruct{val: "127.0.0.1/8"},
+			// global addresses on loopback interface
+			addrStruct{val: "10.1.1.1/32"}, addrStruct{val: "fd00:1:1::1/128"}}
+	}
+	return ifat, nil
+}
+func (_ globalsNetworkInterface) Interfaces() ([]net.Interface, error) {
+	return []net.Interface{upIntf, loopbackIntf}, nil
+}
+
 // Unable to get IP addresses for interface
 type networkInterfaceFailGetAddrs struct {
 }
@@ -433,29 +579,69 @@ func TestGetIPFromInterface(t *testing.T) {
 	}
 }
 
+func TestGetIPFromLoopbackInterface(t *testing.T) {
+	testCases := []struct {
+		tcase      string
+		family     AddressFamily
+		nw         networkInterfacer
+		expected   net.IP
+		errStrFrag string
+	}{
+		{"ipv4", familyIPv4, linkLocalLoopbackNetworkInterface{}, net.ParseIP("10.1.1.1"), ""},
+		{"ipv6", familyIPv6, linkLocalLoopbackNetworkInterface{}, net.ParseIP("fd00:1:1::1"), ""},
+		{"no global ipv4", familyIPv4, loopbackNetworkInterface{}, nil, ""},
+		{"no global ipv6", familyIPv6, loopbackNetworkInterface{}, nil, ""},
+	}
+	for _, tc := range testCases {
+		ip, err := getIPFromLoopbackInterface(tc.family, tc.nw)
+		if err != nil {
+			if !strings.Contains(err.Error(), tc.errStrFrag) {
+				t.Errorf("case[%s]: Error string %q does not contain %q", tc.tcase, err, tc.errStrFrag)
+			}
+		} else if tc.errStrFrag != "" {
+			t.Errorf("case[%s]: Error %q expected, but seen %v", tc.tcase, tc.errStrFrag, err)
+		} else if !ip.Equal(tc.expected) {
+			t.Errorf("case[%v]: expected %v, got %+v .err : %v", tc.tcase, tc.expected, ip, err)
+		}
+	}
+}
+
 func TestChooseHostInterfaceFromRoute(t *testing.T) {
 	testCases := []struct {
 		tcase    string
-		inFile   io.Reader
+		routes   []Route
 		nw       networkInterfacer
+		order    AddressFamilyPreference
 		expected net.IP
 	}{
-		{"ipv4", strings.NewReader(gatewayfirst), validNetworkInterface{}, net.ParseIP("10.254.71.145")},
-		{"ipv6", strings.NewReader(gatewaymiddle), ipv6NetworkInterface{}, net.ParseIP("2001::200")},
-		{"no non-link-local ip", strings.NewReader(gatewaymiddle), networkInterfaceWithOnlyLinkLocals{}, nil},
-		{"no routes", strings.NewReader(nothing), validNetworkInterface{}, nil},
-		{"no route file", nil, validNetworkInterface{}, nil},
-		{"no interfaces", nil, noNetworkInterface{}, nil},
-		{"no interface addrs", strings.NewReader(gatewaymiddle), networkInterfaceWithNoAddrs{}, nil},
-		{"fail get addrs", strings.NewReader(gatewaymiddle), networkInterfaceFailGetAddrs{}, nil},
+		{"single-stack ipv4", routeV4, validNetworkInterface{}, preferIPv4, net.ParseIP("10.254.71.145")},
+		{"single-stack ipv4, prefer v6", routeV4, validNetworkInterface{}, preferIPv6, net.ParseIP("10.254.71.145")},
+		{"single-stack ipv6", routeV6, ipv6NetworkInterface{}, preferIPv4, net.ParseIP("2001::200")},
+		{"single-stack ipv6, prefer v6", routeV6, ipv6NetworkInterface{}, preferIPv6, net.ParseIP("2001::200")},
+		{"dual stack", bothRoutes, v4v6NetworkInterface{}, preferIPv4, net.ParseIP("10.254.71.145")},
+		{"dual stack, prefer v6", bothRoutes, v4v6NetworkInterface{}, preferIPv6, net.ParseIP("2001::10")},
+		{"LLA and loopback with global, IPv4", routeV4, linkLocalLoopbackNetworkInterface{}, preferIPv4, net.ParseIP("10.1.1.1")},
+		{"LLA and loopback with global, IPv6", routeV6, linkLocalLoopbackNetworkInterface{}, preferIPv6, net.ParseIP("fd00:1:1::1")},
+		{"LLA and loopback with global, dual stack prefer IPv4", bothRoutes, linkLocalLoopbackNetworkInterface{}, preferIPv4, net.ParseIP("10.1.1.1")},
+		{"LLA and loopback with global, dual stack prefer IPv6", bothRoutes, linkLocalLoopbackNetworkInterface{}, preferIPv6, net.ParseIP("fd00:1:1::1")},
+		{"LLA and loopback with global, no routes", noRoutes, linkLocalLoopbackNetworkInterface{}, preferIPv6, nil},
+		{"interface and loopback with global, IPv4", routeV4, globalsNetworkInterface{}, preferIPv4, net.ParseIP("192.168.1.1")},
+		{"interface and loopback with global, IPv6", routeV6, globalsNetworkInterface{}, preferIPv6, net.ParseIP("fd00::200")},
+		{"interface and loopback with global, dual stack prefer IPv4", bothRoutes, globalsNetworkInterface{}, preferIPv4, net.ParseIP("192.168.1.1")},
+		{"interface and loopback with global, dual stack prefer IPv6", bothRoutes, globalsNetworkInterface{}, preferIPv6, net.ParseIP("fd00::200")},
+		{"interface and loopback with global, no routes", noRoutes, globalsNetworkInterface{}, preferIPv6, nil},
+		{"all LLA", routeV4, networkInterfaceWithOnlyLinkLocals{}, preferIPv4, nil},
+		{"no routes", noRoutes, validNetworkInterface{}, preferIPv4, nil},
+		{"fail get IP", routeV4, networkInterfaceFailGetAddrs{}, preferIPv4, nil},
 	}
 	for _, tc := range testCases {
-		ip, err := chooseHostInterfaceFromRoute(tc.inFile, tc.nw)
+		ip, err := chooseHostInterfaceFromRoute(tc.routes, tc.nw, tc.order)
 		if !ip.Equal(tc.expected) {
 			t.Errorf("case[%v]: expected %v, got %+v .err : %v", tc.tcase, tc.expected, ip, err)
 		}
 	}
 }
+
 func TestMemberOf(t *testing.T) {
 	testCases := []struct {
 		tcase    string
@@ -479,29 +665,156 @@ func TestGetIPFromHostInterfaces(t *testing.T) {
 	testCases := []struct {
 		tcase      string
 		nw         networkInterfacer
+		order      AddressFamilyPreference
 		expected   net.IP
 		errStrFrag string
 	}{
-		{"fail get I/Fs", failGettingNetworkInterface{}, nil, "failed getting all interfaces"},
-		{"no interfaces", noNetworkInterface{}, nil, "no interfaces"},
-		{"I/F not up", downNetworkInterface{}, nil, "no acceptable"},
-		{"loopback only", loopbackNetworkInterface{}, nil, "no acceptable"},
-		{"P2P I/F only", p2pNetworkInterface{}, nil, "no acceptable"},
-		{"fail get addrs", networkInterfaceFailGetAddrs{}, nil, "unable to get Addrs"},
-		{"no addresses", networkInterfaceWithNoAddrs{}, nil, "no acceptable"},
-		{"invalid addr", networkInterfaceWithInvalidAddr{}, nil, "invalid CIDR"},
-		{"no matches", networkInterfaceWithOnlyLinkLocals{}, nil, "no acceptable"},
-		{"ipv4", validNetworkInterface{}, net.ParseIP("10.254.71.145"), ""},
-		{"ipv6", ipv6NetworkInterface{}, net.ParseIP("2001::200"), ""},
+		{"fail get I/Fs", failGettingNetworkInterface{}, preferIPv4, nil, "failed getting all interfaces"},
+		{"no interfaces", noNetworkInterface{}, preferIPv4, nil, "no interfaces"},
+		{"I/F not up", downNetworkInterface{}, preferIPv4, nil, "no acceptable"},
+		{"loopback only", loopbackNetworkInterface{}, preferIPv4, nil, "no acceptable"},
+		{"P2P I/F only", p2pNetworkInterface{}, preferIPv4, nil, "no acceptable"},
+		{"fail get addrs", networkInterfaceFailGetAddrs{}, preferIPv4, nil, "unable to get Addrs"},
+		{"no addresses", networkInterfaceWithNoAddrs{}, preferIPv4, nil, "no acceptable"},
+		{"invalid addr", networkInterfaceWithInvalidAddr{}, preferIPv4, nil, "invalid CIDR"},
+		{"no matches", networkInterfaceWithOnlyLinkLocals{}, preferIPv4, nil, "no acceptable"},
+		{"single-stack ipv4", validNetworkInterface{}, preferIPv4, net.ParseIP("10.254.71.145"), ""},
+		{"single-stack ipv4, prefer ipv6", validNetworkInterface{}, preferIPv6, net.ParseIP("10.254.71.145"), ""},
+		{"single-stack ipv6", ipv6NetworkInterface{}, preferIPv4, net.ParseIP("2001::200"), ""},
+		{"single-stack ipv6, prefer ipv6", ipv6NetworkInterface{}, preferIPv6, net.ParseIP("2001::200"), ""},
+		{"dual stack", v4v6NetworkInterface{}, preferIPv4, net.ParseIP("10.254.71.145"), ""},
+		{"dual stack, prefer ipv6", v4v6NetworkInterface{}, preferIPv6, net.ParseIP("2001::10"), ""},
 	}
 
 	for _, tc := range testCases {
-		ip, err := chooseIPFromHostInterfaces(tc.nw)
+		ip, err := chooseIPFromHostInterfaces(tc.nw, tc.order)
 		if !ip.Equal(tc.expected) {
 			t.Errorf("case[%s]: expected %+v, got %+v with err : %v", tc.tcase, tc.expected, ip, err)
 		}
 		if err != nil && !strings.Contains(err.Error(), tc.errStrFrag) {
 			t.Errorf("case[%s]: unable to find %q in error string %q", tc.tcase, tc.errStrFrag, err.Error())
+		}
+	}
+}
+
+func makeRouteFile(content string, t *testing.T) (*os.File, error) {
+	routeFile, err := ioutil.TempFile("", "route")
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := routeFile.Write([]byte(content)); err != nil {
+		return routeFile, err
+	}
+	err = routeFile.Close()
+	return routeFile, err
+}
+
+func TestFailGettingIPv4Routes(t *testing.T) {
+	defer func() { v4File.name = ipv4RouteFile }()
+
+	// Try failure to open file (should not occur, as caller ensures we have IPv4 route file, but being thorough)
+	v4File.name = "no-such-file"
+	errStrFrag := "no such file"
+	_, err := v4File.extract()
+	if err == nil {
+		t.Errorf("Expected error trying to read non-existent v4 route file")
+	}
+	if !strings.Contains(err.Error(), errStrFrag) {
+		t.Errorf("Unable to find %q in error string %q", errStrFrag, err.Error())
+	}
+}
+
+func TestFailGettingIPv6Routes(t *testing.T) {
+	defer func() { v6File.name = ipv6RouteFile }()
+
+	// Try failure to open file (this would be ignored by caller)
+	v6File.name = "no-such-file"
+	errStrFrag := "no such file"
+	_, err := v6File.extract()
+	if err == nil {
+		t.Errorf("Expected error trying to read non-existent v6 route file")
+	}
+	if !strings.Contains(err.Error(), errStrFrag) {
+		t.Errorf("Unable to find %q in error string %q", errStrFrag, err.Error())
+	}
+}
+
+func TestGetAllDefaultRoutesFailNoV4RouteFile(t *testing.T) {
+	defer func() { v4File.name = ipv4RouteFile }()
+
+	// Should not occur, as caller ensures we have IPv4 route file, but being thorough
+	v4File.name = "no-such-file"
+	errStrFrag := "no such file"
+	_, err := getAllDefaultRoutes()
+	if err == nil {
+		t.Errorf("Expected error trying to read non-existent v4 route file")
+	}
+	if !strings.Contains(err.Error(), errStrFrag) {
+		t.Errorf("Unable to find %q in error string %q", errStrFrag, err.Error())
+	}
+}
+
+func TestGetAllDefaultRoutes(t *testing.T) {
+	testCases := []struct {
+		tcase      string
+		v4Info     string
+		v6Info     string
+		count      int
+		expected   []Route
+		errStrFrag string
+	}{
+		{"no routes", noInternetConnection, v6noDefaultRoutes, 0, nil, "no default routes"},
+		{"only v4 route", gatewayfirst, v6noDefaultRoutes, 1, routeV4, ""},
+		{"only v6 route", noInternetConnection, v6gatewayfirst, 1, routeV6, ""},
+		{"v4 and v6 routes", gatewayfirst, v6gatewayfirst, 2, bothRoutes, ""},
+	}
+	defer func() {
+		v4File.name = ipv4RouteFile
+		v6File.name = ipv6RouteFile
+	}()
+
+	for _, tc := range testCases {
+		routeFile, err := makeRouteFile(tc.v4Info, t)
+		if routeFile != nil {
+			defer os.Remove(routeFile.Name())
+		}
+		if err != nil {
+			t.Errorf("case[%s]: test setup failure for IPv4 route file: %v", tc.tcase, err)
+		}
+		v4File.name = routeFile.Name()
+		v6routeFile, err := makeRouteFile(tc.v6Info, t)
+		if v6routeFile != nil {
+			defer os.Remove(v6routeFile.Name())
+		}
+		if err != nil {
+			t.Errorf("case[%s]: test setup failure for IPv6 route file: %v", tc.tcase, err)
+		}
+		v6File.name = v6routeFile.Name()
+
+		routes, err := getAllDefaultRoutes()
+		if err != nil {
+			if !strings.Contains(err.Error(), tc.errStrFrag) {
+				t.Errorf("case[%s]: Error string %q does not contain %q", tc.tcase, err, tc.errStrFrag)
+			}
+		} else if tc.errStrFrag != "" {
+			t.Errorf("case[%s]: Error %q expected, but not seen", tc.tcase, tc.errStrFrag)
+		} else {
+			if tc.count != len(routes) {
+				t.Errorf("case[%s]: expected %d routes, have %v", tc.tcase, tc.count, routes)
+			}
+			for i, expected := range tc.expected {
+				if !expected.Gateway.Equal(routes[i].Gateway) {
+					t.Errorf("case[%s]: at %d expected %v, got %v .err : %v", tc.tcase, i, tc.expected, routes, err)
+				}
+				zeroIP := net.IPv4zero
+				if expected.Family == familyIPv6 {
+					zeroIP = net.IPv6zero
+				}
+				if !routes[i].Destination.Equal(zeroIP) {
+					t.Errorf("case[%s}: at %d destination is not for default route (not %v)", tc.tcase, i, zeroIP)
+				}
+			}
 		}
 	}
 }
