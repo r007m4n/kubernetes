@@ -651,13 +651,6 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 		verifyResult(cs, 1, 0, ns)
 	})
 
-	/*
-		Release: v1.16
-		Testname: Scheduling, HostPort matching and HostIP and Protocol not-matching
-		Description: Pods with the same HostPort value MUST be able to be scheduled to the same node
-		if the HostIP or Protocol is different. This test doesn´t test the HostPort functionality.
-		 xref: https://github.com/kubernetes/kubernetes/issues/98075
-	*/
 	ginkgo.It("validates that there is no conflict between pods with same hostPort but different hostIP and protocol", func() {
 
 		nodeName := GetNodeThatCanRunPod(f)
@@ -725,6 +718,9 @@ var _ = SIGDescribe("SchedulerPredicates [Serial]", func() {
 		topologyKey := "kubernetes.io/e2e-pts-filter"
 
 		ginkgo.BeforeEach(func() {
+			if len(nodeList.Items) < 2 {
+				ginkgo.Skip("At least 2 nodes are required to run the test")
+			}
 			ginkgo.By("Trying to get 2 available nodes which can run pod")
 			nodeNames = Get2NodesThatCanRunPod(f)
 			ginkgo.By(fmt.Sprintf("Apply dedicated topologyKey %v for this test on the 2 nodes.", topologyKey))

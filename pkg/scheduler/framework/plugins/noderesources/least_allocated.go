@@ -70,8 +70,7 @@ func NewLeastAllocated(laArgs runtime.Object, h framework.Handle) (framework.Plu
 	if !ok {
 		return nil, fmt.Errorf("want args to be of type NodeResourcesLeastAllocatedArgs, got %T", laArgs)
 	}
-
-	if err := validation.ValidateNodeResourcesLeastAllocatedArgs(args); err != nil {
+	if err := validation.ValidateNodeResourcesLeastAllocatedArgs(nil, args); err != nil {
 		return nil, err
 	}
 
@@ -97,6 +96,9 @@ func leastResourceScorer(resToWeightMap resourceToWeightMap) func(resourceToValu
 			resourceScore := leastRequestedScore(requested[resource], allocable[resource])
 			nodeScore += resourceScore * weight
 			weightSum += weight
+		}
+		if weightSum == 0 {
+			return 0
 		}
 		return nodeScore / weightSum
 	}

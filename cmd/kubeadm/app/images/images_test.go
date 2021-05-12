@@ -51,14 +51,6 @@ func TestGetKubernetesImage(t *testing.T) {
 		cfg      *kubeadmapi.ClusterConfiguration
 	}{
 		{
-			expected: GetGenericImage(gcrPrefix, constants.HyperKube, expected),
-			cfg: &kubeadmapi.ClusterConfiguration{
-				ImageRepository:   gcrPrefix,
-				KubernetesVersion: testversion,
-				UseHyperKubeImage: true,
-			},
-		},
-		{
 			image:    constants.KubeAPIServer,
 			expected: GetGenericImage(gcrPrefix, "kube-apiserver", expected),
 			cfg: &kubeadmapi.ClusterConfiguration{
@@ -223,33 +215,6 @@ func TestGetAllImages(t *testing.T) {
 				},
 			},
 			expect: constants.CoreDNSImageName,
-		},
-		{
-			name: "main kube-dns image is returned",
-			cfg: &kubeadmapi.ClusterConfiguration{
-				DNS: kubeadmapi.DNS{
-					Type: kubeadmapi.KubeDNS,
-				},
-			},
-			expect: constants.KubeDNSKubeDNSImageName,
-		},
-		{
-			name: "kube-dns sidecar image is returned",
-			cfg: &kubeadmapi.ClusterConfiguration{
-				DNS: kubeadmapi.DNS{
-					Type: kubeadmapi.KubeDNS,
-				},
-			},
-			expect: constants.KubeDNSSidecarImageName,
-		},
-		{
-			name: "kube-dns dnsmasq-nanny image is returned",
-			cfg: &kubeadmapi.ClusterConfiguration{
-				DNS: kubeadmapi.DNS{
-					Type: kubeadmapi.KubeDNS,
-				},
-			},
-			expect: constants.KubeDNSDnsMasqNannyImageName,
 		},
 	}
 	for _, tc := range testcases {

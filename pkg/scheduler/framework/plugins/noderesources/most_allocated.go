@@ -68,8 +68,7 @@ func NewMostAllocated(maArgs runtime.Object, h framework.Handle) (framework.Plug
 	if !ok {
 		return nil, fmt.Errorf("want args to be of type NodeResourcesMostAllocatedArgs, got %T", args)
 	}
-
-	if err := validation.ValidateNodeResourcesMostAllocatedArgs(args); err != nil {
+	if err := validation.ValidateNodeResourcesMostAllocatedArgs(nil, args); err != nil {
 		return nil, err
 	}
 
@@ -95,6 +94,9 @@ func mostResourceScorer(resToWeightMap resourceToWeightMap) func(requested, allo
 			resourceScore := mostRequestedScore(requested[resource], allocable[resource])
 			nodeScore += resourceScore * weight
 			weightSum += weight
+		}
+		if weightSum == 0 {
+			return 0
 		}
 		return (nodeScore / weightSum)
 	}

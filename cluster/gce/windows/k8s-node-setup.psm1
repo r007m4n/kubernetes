@@ -57,8 +57,8 @@ $GCE_METADATA_SERVER = "169.254.169.254"
 # exist until an initial HNS network has been created on the Windows node - see
 # Add_InitialHnsNetwork().
 $MGMT_ADAPTER_NAME = "vEthernet (Ethernet*"
-$CRICTL_VERSION = 'v1.20.0'
-$CRICTL_SHA256 = 'cc909108ee84d39b2e9d7ac0cb9599b6fa7fc51f5a7da7014052684cd3e3f65e'
+$CRICTL_VERSION = 'v1.21.0'
+$CRICTL_SHA256 = '437d5301f6f5b9848ef057cee98474ce11a6679c91b4d4e83677a8c1f2415143'
 
 Import-Module -Force C:\common.psm1
 
@@ -159,6 +159,20 @@ function Dump-DebugInfoToConsole {
     Log-Output "Installed hotfixes:`n$hotfixes"
     Log-Output "GCE Windows image:`n$image"
   } Catch { }
+}
+
+# Configures Window Defender preferences
+function Configure-WindowsDefender {
+  if ((Get-WindowsFeature -Name 'Windows-Defender').Installed) {
+    Log-Output "Configuring Windows Defender preferences"
+    Set-MpPreference -SubmitSamplesConsent NeverSend
+    Log-Output "Disabling Windows Defender sample submission"
+    Set-MpPreference -MAPSReporting Disabled
+    Log-Output "Disabling Windows Defender Microsoft Active Protection Service Reporting"
+
+    Log-Output "Defender Preferences"
+    Get-MpPreference
+  }
 }
 
 # Converts the kube-env string in Yaml
@@ -303,10 +317,13 @@ function Set-PrerequisiteOptions {
   Log-Output "Disabling Windows Update service"
   & sc.exe config wuauserv start=disabled
   & sc.exe stop wuauserv
+  Write-VerboseServiceInfoToConsole -Service 'wuauserv' -Delay 1
 
   # Use TLS 1.2: needed for Invoke-WebRequest downloads from github.com.
   [Net.ServicePointManager]::SecurityProtocol = `
       [Net.SecurityProtocolType]::Tls12
+
+  Configure-WindowsDefender
 }
 
 # Creates directories where other functions in this module will read and write
@@ -427,6 +444,7 @@ function Start-CSIProxy {
     & sc.exe failure csiproxy reset= 0 actions= restart/10000
     Log-Output "Starting CSI Proxy Service"
     & sc.exe start csiproxy
+    Write-VerboseServiceInfoToConsole -Service 'csiproxy' -Delay 1
   }
 }
 
@@ -1216,6 +1234,7 @@ function Start-WorkerServices {
 
   Log-Output "Waiting 10 seconds for kubelet to stabilize"
   Start-Sleep 10
+  Write-VerboseServiceInfoToConsole -Service 'kubelet'
 
   if (Get-Process | Where-Object Name -eq "kube-proxy") {
     Log-Output -Fatal `
@@ -1226,6 +1245,7 @@ function Start-WorkerServices {
   & sc.exe failure kube-proxy reset= 0 actions= restart/10000
   Log-Output "Starting kube-proxy service"
   & sc.exe start kube-proxy
+  Write-VerboseServiceInfoToConsole -Service 'kube-proxy' -Delay 1
 
   # F1020 23:08:52.000083    9136 server.go:361] unable to load in-cluster
   # configuration, KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be
@@ -1521,21 +1541,16 @@ function Install_Containerd {
     return
   }
 
-  # TODO(random-liu): Change this to official release path after testing.
-  $CONTAINERD_GCS_BUCKET = "cri-containerd-staging/windows"
-
   $tmp_dir = 'C:\containerd_tmp'
   New-Item $tmp_dir -ItemType 'directory' -Force | Out-Null
 
-  $version_url = "https://storage.googleapis.com/$CONTAINERD_GCS_BUCKET/latest"
-  MustDownload-File -URLs $version_url -OutFile $tmp_dir\version
-  $version = $(Get-Content $tmp_dir\version)
-
-  $tar_url = ("https://storage.googleapis.com/$CONTAINERD_GCS_BUCKET/" +
-              "cri-containerd-cni-$version.windows-amd64.tar.gz")
-  $sha_url = $tar_url + ".sha256"
-  MustDownload-File -URLs $sha_url -OutFile $tmp_dir\sha256
-  $sha = $(Get-Content $tmp_dir\sha256)
+  # TODO(ibrahimab) Change this to a gcs bucket with CI maintained and accessible by community.
+  $version = '1.4.4'
+  $tar_url = ("https://github.com/containerd/containerd/releases/download/v${version}/" +
+              "cri-containerd-cni-${version}-windows-amd64.tar.gz")
+  $sha_url = $tar_url + ".sha256sum"
+  MustDownload-File -URLs $sha_url -OutFile $tmp_dir\sha256sum
+  $sha = $(Get-Content $tmp_dir\sha256sum).Split(" ")[0].ToUpper()
 
   MustDownload-File `
       -URLs $tar_url `
@@ -1544,32 +1559,60 @@ function Install_Containerd {
       -Algorithm SHA256
 
   tar xzvf $tmp_dir\containerd.tar.gz -C $tmp_dir
-  Move-Item -Force $tmp_dir\cni\*.exe ${env:CNI_DIR}\
-  Move-Item -Force $tmp_dir\*.exe ${env:NODE_DIR}\
+  Move-Item -Force $tmp_dir\cni\*.exe "${env:CNI_DIR}\"
+  Move-Item -Force $tmp_dir\*.exe "${env:NODE_DIR}\"
   Remove-Item -Force -Recurse $tmp_dir
+
+  # Exclusion for Defender.
+  Add-MpPreference -ExclusionProcess "${env:NODE_DIR}\containerd.exe"
+}
+
+# Lookup the path of containerd config if exists, else returns a default.
+function Get_Containerd_ConfigPath {
+  $service = Get-WMIObject -Class Win32_Service -Filter  "Name='containerd'"
+  if (!($service -eq $null) -and
+      $service.PathName -match ".*\s--config\s*(\S+).*" -and
+      $matches.Count -eq 2) {
+    return $matches[1]
+  } else {
+    return 'C:\Program Files\containerd\config.toml'
+  }
 }
 
 # Generates the containerd config.toml file.
 function Configure_Containerd {
-  $config_dir = 'C:\Program Files\containerd'
+  $config_path = Get_Containerd_ConfigPath
+  $config_dir = [System.IO.Path]::GetDirectoryName($config_path)
   New-Item $config_dir -ItemType 'directory' -Force | Out-Null
-  Set-Content "$config_dir\config.toml" @"
+  Set-Content ${config_path} @"
+[plugins.scheduler]
+  schedule_delay = '0s'
+  startup_delay = '0s'
 [plugins.cri]
   sandbox_image = 'INFRA_CONTAINER_IMAGE'
+[plugins.cri.containerd]
+  snapshotter = 'windows'
+  default_runtime_name = 'runhcs-wcow-process'
+  disable_snapshot_annotations = true
+  discard_unpacked_layers = true
 [plugins.cri.cni]
   bin_dir = 'CNI_BIN_DIR'
   conf_dir = 'CNI_CONF_DIR'
 "@.replace('INFRA_CONTAINER_IMAGE', ${env:INFRA_CONTAINER}).`
-    replace('CNI_BIN_DIR', ${env:CNI_DIR}).`
-    replace('CNI_CONF_DIR', ${env:CNI_CONFIG_DIR})
+    replace('CNI_BIN_DIR', "${env:CNI_DIR}").`
+    replace('CNI_CONF_DIR', "${env:CNI_CONFIG_DIR}")
 }
 
-# Register and start containerd service.
+# Register if needed and start containerd service.
 function Start_Containerd {
-  Log-Output "Creating containerd service"
-  & containerd.exe --register-service --log-file ${env:LOGS_DIR}/containerd.log
+  # Do the registration only if the containerd service does not exist.
+  if ((Get-WMIObject -Class Win32_Service -Filter  "Name='containerd'") -eq $null) {
+    Log-Output "Creating containerd service"
+    & containerd.exe --register-service --log-file "${env:LOGS_DIR}/containerd.log"
+  }
+
   Log-Output "Starting containerd service"
-  Start-Service containerd
+  Restart-Service containerd
 }
 
 # Pigz Resources
@@ -1598,6 +1641,8 @@ function Install-Pigz {
       # Windows path it'll use it instead of the default unzipper.
       # See: https://github.com/containerd/containerd/issues/1896
       Add-MachineEnvironmentPath -Path $PIGZ_ROOT
+      # Add process exclusion for Windows Defender to boost performance.
+      Add-MpPreference -ExclusionProcess "$PIGZ_ROOT\unpigz.exe"
       Log-Output "Installed Pigz $PIGZ_VERSION"
     } else {
       Log-Output "Pigz already installed."
@@ -1608,12 +1653,12 @@ function Install-Pigz {
 # TODO(pjh): move the logging agent code below into a separate
 # module; it was put here temporarily to avoid disrupting the file layout in
 # the K8s release machinery.
-$LOGGINGAGENT_VERSION = '1.6.0'
+$LOGGINGAGENT_VERSION = '1.7.3'
 $LOGGINGAGENT_ROOT = 'C:\fluent-bit'
 $LOGGINGAGENT_SERVICE = 'fluent-bit'
 $LOGGINGAGENT_CMDLINE = '*fluent-bit.exe*'
 
-$LOGGINGEXPORTER_VERSION = 'v0.10.3'
+$LOGGINGEXPORTER_VERSION = 'v0.16.2'
 $LOGGINGEXPORTER_ROOT = 'C:\flb-exporter'
 $LOGGINGEXPORTER_SERVICE = 'flb-exporter'
 $LOGGINGEXPORTER_CMDLINE = '*flb-exporter.exe*'
@@ -1738,15 +1783,15 @@ function DownloadAndInstall-LoggingAgents {
 function Create-LoggingAgentServices {
   cd $LOGGINGAGENT_ROOT
 
-  Log-Output 'Creating service: ${LOGGINGAGENT_SERVICE}'
+  Log-Output "Creating service: ${LOGGINGAGENT_SERVICE}"
   sc.exe create $LOGGINGAGENT_SERVICE binpath= "${LOGGINGAGENT_ROOT}\bin\fluent-bit.exe -c \fluent-bit\conf\fluent-bit.conf"
   sc.exe failure $LOGGINGAGENT_SERVICE reset= 30 actions= restart/5000
-  sc.exe query $LOGGINGAGENT_SERVICE
+  Write-VerboseServiceInfoToConsole -Service $LOGGINGAGENT_SERVICE
 
-  Log-Output 'Creating service: ${LOGGINGEXPORTER_SERVICE}'
+  Log-Output "Creating service: ${LOGGINGEXPORTER_SERVICE}"
   sc.exe create  $LOGGINGEXPORTER_SERVICE  binpath= "${LOGGINGEXPORTER_ROOT}\flb-exporter.exe --kubernetes-separator=_ --stackdriver-resource-model=k8s --enable-pod-label-discovery --logtostderr --winsvc  --pod-label-dot-replacement=_"
   sc.exe failure $LOGGINGEXPORTER_SERVICE reset= 30 actions= restart/5000
-  sc.exe query $LOGGINGEXPORTER_SERVICE
+  Write-VerboseServiceInfoToConsole -Service $LOGGINGEXPORTER_SERVICE
 }
 
 # Writes the logging configuration file for Logging agent. Restart-LoggingAgent
@@ -1763,6 +1808,10 @@ function Configure-LoggingAgent {
 
   $fluentbit_parser_file = "$LOGGINGAGENT_ROOT\conf\parsers.conf"
   $PARSERS_CONFIG | Out-File -FilePath $fluentbit_parser_file -Encoding ASCII
+
+  # Create directory for all the log position files.
+  New-Item -Type Directory -Path "/var/run/google-fluentbit/pos-files/" -Force | Out-Null
+
   Log-Output "Wrote logging config to $fluentbit_parser_file"
 }
 
@@ -1771,7 +1820,7 @@ $FLUENTBIT_CONFIG = @'
 [SERVICE]
     Flush         5
     Grace         120
-    Log_Level     debug
+    Log_Level     info
     Log_File      /var/log/fluentbit.log
     Daemon        off
     Parsers_File  parsers.conf
@@ -1822,15 +1871,13 @@ $FLUENTBIT_CONFIG = @'
     #
     # storage.backlog.mem_limit 5M
 
-
 [INPUT]
     Name         winlog
     Interval_Sec 2
     # Channels Setup,Windows PowerShell
     Channels     application,system,security
     Tag          winevent.raw
-    DB           winlog.sqlite   #
-
+    DB           /var/run/google-fluentbit/pos-files/winlog.db
 
 # Json Log Example:
 # {"log":"[info:2016-02-16T16:04:05.930-08:00] Some log text here\n","stream":"stdout","time":"2016-02-17T00:04:05.931087621Z"}
@@ -1839,40 +1886,19 @@ $FLUENTBIT_CONFIG = @'
     Alias            kube_containers
     Tag              kube_<namespace_name>_<pod_name>_<container_name>
     Tag_Regex        (?<pod_name>[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)_(?<namespace_name>[^_]+)_(?<container_name>.+)-
-    Path             /var/log/containers/*.log
     Mem_Buf_Limit    5MB
     Skip_Long_Lines  On
     Refresh_Interval 5
-    DB               flb_kube.db
+    Path             C:\var\log\containers\*.log
+    DB               /var/run/google-fluentbit/pos-files/flb_kube.db
 
-    # Settings from fluentd missing here.
-    # tag reform.*
-    # format json
-    # time_key time
-    # time_format %Y-%m-%dT%H:%M:%S.%NZ
-
-
-# Example:
-# I0204 07:32:30.020537    3368 server.go:1048] POST /stats/container/: (13.972191ms) 200 [[Go-http-client/1.1] 10.244.1.3:40537]
-[INPUT]
-    Name             tail
-    Alias            kubelet
-    Tag              kubelet
-    #Multiline        on
-    #Multiline_Flush  5
-    Mem_Buf_Limit    5MB
-    Skip_Long_Lines  On
-    Refresh_Interval 5
-    Path /etc/kubernetes/logs/kubelet.log
-    DB               /etc/kubernetes/logs/gcp-kubelet.db
-
-    # Copied from fluentbit config. How is this used ? In match stages ?
-    Parser_Firstline /^\w\d{4}/
-    Parser_1         ^(?<severity>\w)(?<time>\d{4} [^\s]*)\s+(?<pid>\d+)\s+(?<source>[^ \]]+)\] (?<message>.*)/
-
-    # missing from fluentbit
-    #   time_format %m%d %H:%M:%S.%N
-
+[FILTER]
+    Name         parser
+    Match        kube_*
+    Key_Name     log
+    Reserve_Data True
+    Parser       docker
+    Parser       containerd
 
 # Example:
 # I0928 03:15:50.440223    4880 main.go:51] Starting CSI-Proxy Server ...
@@ -1880,86 +1906,80 @@ $FLUENTBIT_CONFIG = @'
     Name             tail
     Alias            csi-proxy
     Tag              csi-proxy
-    #Multiline        on
-    #Multiline_Flush  5
     Mem_Buf_Limit    5MB
     Skip_Long_Lines  On
     Refresh_Interval 5
     Path             /etc/kubernetes/logs/csi-proxy.log
-    DB               /etc/kubernetes/logs/gcp-csi-proxy.db
-
-    # Copied from fluentbit config. How is this used ? In match stages ?
-    Parser_Firstline /^\w\d{4}/
-    Parser_1         ^(?<severity>\w)(?<time>\d{4} [^\s]*)\s+(?<pid>\d+)\s+(?<source>[^ \]]+)\] (?<message>.*)/
-
-    # missing from fluentbit
-    #   time_format %m%d %H:%M:%S.%N
-
-# Example:
-# time="2019-12-10T21:27:59.836946700Z" level=info msg="loading plugin \"io.containerd.grpc.v1.cri\"..." type=io.containerd.grpc.v1
-[INPUT]
-    Name             tail
-    Alias            container-runtime
-    Tag container-runtime
-    #Multiline        on
-    #Multiline_Flush  5
-    Mem_Buf_Limit    5MB
-    Skip_Long_Lines  On
-    Refresh_Interval 5
-    Path             /etc/kubernetes/logs/containerd.log
-    DB               /etc/kubernetes/logs/gcp-containerd.log.pos
-
-    # Copied from fluentbit config. How is this used ? In match stages ?
-    Parser_Firstline /^\w\d{4}/
-    Parser_1         ^(?<severity>\w)(?<time>\d{4} [^\s]*)\s+(?<pid>\d+)\s+(?<source>[^ \]]+)\] (?<message>.*)/
-
-    # missing from fluentbit
-    #   time_format %m%d %H:%M:%S.%N
-
+    DB               /var/run/google-fluentbit/pos-files/csi-proxy.db
+    Multiline        On
+    Parser_Firstline glog
 
 # I1118 21:26:53.975789       6 proxier.go:1096] Port "nodePort for kube-system/default-http-backend:http" (:31429/tcp) was open before and is still needed
 [INPUT]
     Name             tail
     Alias            kube-proxy
     Tag              kube-proxy
-    #Multiline        on
-    #Multiline_Flush  5
     Mem_Buf_Limit    5MB
     Skip_Long_Lines  On
     Refresh_Interval 5
     Path             /etc/kubernetes/logs/kube-proxy.log
-    DB               /etc/kubernetes/logs/gcp-kubeproxy.db
+    DB               /var/run/google-fluentbit/pos-files/kube-proxy.db
+    Multiline        On
+    Parser_Firstline glog
 
-    # Copied from fluentbit config. How is this used ? In match stages ?
-    Parser_Firstline /^\w\d{4}/
-    Parser_1         ^(?<severity>\w)(?<time>\d{4} [^\s]*)\s+(?<pid>\d+)\s+(?<source>[^ \]]+)\] (?<message>.*)/
+# Example:
+# time="2019-12-10T21:27:59.836946700Z" level=info msg="loading plugin \"io.containerd.grpc.v1.cri\"..." type=io.containerd.grpc.v1
+[INPUT]
+    Name             tail
+    Alias            container-runtime
+    Tag              container-runtime
+    Mem_Buf_Limit    5MB
+    Skip_Long_Lines  On
+    Refresh_Interval 5
+    Path             /etc/kubernetes/logs/containerd.log
+    DB               /var/run/google-fluentbit/pos-files/container-runtime.db
+    # TODO: Add custom parser for containerd logs once format is settled.
 
-    # missing from fluentbit
-    #   time_format %m%d %H:%M:%S.%N
+# Example:
+# I0204 07:32:30.020537    3368 server.go:1048] POST /stats/container/: (13.972191ms) 200 [[Go-http-client/1.1] 10.244.1.3:40537]
+[INPUT]
+    Name             tail
+    Alias            kubelet
+    Tag              kubelet
+    Mem_Buf_Limit    5MB
+    Skip_Long_Lines  On
+    Refresh_Interval 5
+    Path             /etc/kubernetes/logs/kubelet.log
+    DB               /var/run/google-fluentbit/pos-files/kubelet.db
+    Multiline        On
+    Parser_Firstline glog
 
 [FILTER]
     Name        modify
     Match       *
     Hard_rename log message
 
-# [OUTPUT]
-#    Name        http
-#    Match       *
-#    Host        127.0.0.1
-#    Port        2021
-#    URI         /logs
-#    header_tag  FLUENT-TAG
-#    Format      msgpack
-#    Retry_Limit 2
+[FILTER]
+    Name         parser
+    Match        kube_*
+    Key_Name     message
+    Reserve_Data True
+    Parser       glog
+    Parser       json
 
 [OUTPUT]
-    name  stackdriver
-    match *
+    Name        http
+    Match       *
+    Host        127.0.0.1
+    Port        2021
+    URI         /logs
+    header_tag  FLUENT-TAG
+    Format      msgpack
+    Retry_Limit 2
 '@
 
 # Fluentbit parsers config file
 $PARSERS_CONFIG = @'
-
 [PARSER]
     Name        docker
     Format      json
@@ -1996,22 +2016,6 @@ $PARSERS_CONFIG = @'
     Format      json
     Time_Key    timestamp
     Time_Format %Y-%m-%dT%H:%M:%S.%L%z
-
-# ----------
-
-[PARSER]
-    Name   json
-    Format json
-    Time_Key time
-    Time_Format %d/%b/%Y:%H:%M:%S %z
-
-[PARSER]
-    Name         docker
-    Format       json
-    Time_Key     time
-    Time_Format  %Y-%m-%dT%H:%M:%S.%L
-    Time_Keep    On
-
 
 [PARSER]
     Name        syslog-rfc5424
@@ -2118,6 +2122,7 @@ function Configure-StackdriverAgent {
   # seconds. The logging agent may die die to various disruptions but can be
   # resumed.
   sc.exe failure StackdriverLogging reset= 0 actions= restart/1000/restart/10000
+  Write-VerboseServiceInfoToConsole -Service 'StackdriverLogging'
 }
 
 # The NODE_NAME placeholder must be replaced with the node's name (hostname).

@@ -95,6 +95,7 @@ const (
 	// owner: @apelisse, @lavalamp
 	// alpha: v1.14
 	// beta: v1.16
+	// stable: v1.22
 	//
 	// Server-side apply. Merging happens on the server.
 	ServerSideApply featuregate.Feature = "ServerSideApply"
@@ -151,6 +152,7 @@ const (
 
 	// owner: @wojtek-t
 	// alpha: v1.20
+	// beta: v1.21
 	//
 	// Allows for updating watchcache resource version with progress notify events.
 	EfficientWatchResumption featuregate.Feature = "EfficientWatchResumption"
@@ -177,7 +179,7 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 	APIListChunking:          {Default: true, PreRelease: featuregate.Beta},
 	DryRun:                   {Default: true, PreRelease: featuregate.GA},
 	RemainingItemCount:       {Default: true, PreRelease: featuregate.Beta},
-	ServerSideApply:          {Default: true, PreRelease: featuregate.Beta},
+	ServerSideApply:          {Default: true, PreRelease: featuregate.GA},
 	StorageVersionHash:       {Default: true, PreRelease: featuregate.Beta},
 	StorageVersionAPI:        {Default: false, PreRelease: featuregate.Alpha},
 	WatchBookmark:            {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
@@ -185,6 +187,6 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 	RemoveSelfLink:           {Default: true, PreRelease: featuregate.Beta},
 	SelectorIndex:            {Default: true, PreRelease: featuregate.GA, LockToDefault: true},
 	WarningHeaders:           {Default: true, PreRelease: featuregate.Beta},
-	EfficientWatchResumption: {Default: false, PreRelease: featuregate.Alpha},
+	EfficientWatchResumption: {Default: true, PreRelease: featuregate.Beta},
 	APIServerIdentity:        {Default: false, PreRelease: featuregate.Alpha},
 }

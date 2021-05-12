@@ -33,7 +33,8 @@ import (
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
+
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -197,7 +198,7 @@ func newAuthenticator(c *cache, config *api.ExecConfig, cluster *clientauthentic
 
 		stdin:       os.Stdin,
 		stderr:      os.Stderr,
-		interactive: terminal.IsTerminal(int(os.Stdout.Fd())),
+		interactive: term.IsTerminal(int(os.Stdin.Fd())),
 		now:         time.Now,
 		environ:     os.Environ,
 
@@ -400,7 +401,9 @@ func (a *Authenticator) refreshCredsLocked(r *clientauthentication.Response) err
 		cmd.Stdin = a.stdin
 	}
 
-	if err := cmd.Run(); err != nil {
+	err = cmd.Run()
+	incrementCallsMetric(err)
+	if err != nil {
 		return a.wrapCmdRunErrorLocked(err)
 	}
 
@@ -458,7 +461,7 @@ func (a *Authenticator) refreshCredsLocked(r *clientauthentication.Response) err
 	if oldCreds != nil && !reflect.DeepEqual(oldCreds.cert, a.cachedCreds.cert) {
 		// Can be nil if the exec auth plugin only returned token auth.
 		if oldCreds.cert != nil && oldCreds.cert.Leaf != nil {
-			metrics.ClientCertRotationAge.Observe(time.Now().Sub(oldCreds.cert.Leaf.NotBefore))
+			metrics.ClientCertRotationAge.Observe(time.Since(oldCreds.cert.Leaf.NotBefore))
 		}
 		a.connTracker.CloseAll()
 	}

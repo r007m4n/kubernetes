@@ -33,6 +33,8 @@ import (
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/audit"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
+	"k8s.io/apiserver/pkg/endpoints/handlers/fieldmanager"
+	"k8s.io/apiserver/pkg/endpoints/handlers/finisher"
 	"k8s.io/apiserver/pkg/endpoints/handlers/negotiation"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/features"
@@ -108,7 +110,7 @@ func UpdateResource(r rest.Updater, scope *RequestScope, admit admission.Interfa
 			scope.err(err, w, req)
 			return
 		}
-		if gvk.GroupVersion() != defaultGVK.GroupVersion() {
+		if !scope.AcceptsGroupVersion(gvk.GroupVersion()) {
 			err = errors.NewBadRequest(fmt.Sprintf("the API version in the data (%s) does not match the expected API version (%s)", gvk.GroupVersion(), defaultGVK.GroupVersion()))
 			scope.err(err, w, req)
 			return
@@ -130,6 +132,7 @@ func UpdateResource(r rest.Updater, scope *RequestScope, admit admission.Interfa
 		// allows skipping managedFields update if the resulting object is too big
 		shouldUpdateManagedFields := true
 		if scope.FieldManager != nil {
+			admit = fieldmanager.NewManagedFieldsValidatingAdmissionController(admit)
 			transformers = append(transformers, func(_ context.Context, newObj, liveObj runtime.Object) (runtime.Object, error) {
 				if shouldUpdateManagedFields {
 					return scope.FieldManager.UpdateNoErrors(liveObj, newObj, managerOrUserAgent(options.FieldManager, req.UserAgent())), nil
@@ -196,7 +199,7 @@ func UpdateResource(r rest.Updater, scope *RequestScope, admit admission.Interfa
 		}
 		// Dedup owner references before updating managed fields
 		dedupOwnerReferencesAndAddWarning(obj, req.Context(), false)
-		result, err := finishRequest(ctx, func() (runtime.Object, error) {
+		result, err := finisher.FinishRequest(ctx, func() (runtime.Object, error) {
 			result, err := requestFunc()
 			// If the object wasn't committed to storage because it's serialized size was too large,
 			// it is safe to remove managedFields (which can be large) and try again.

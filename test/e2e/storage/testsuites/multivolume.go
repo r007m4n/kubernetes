@@ -408,9 +408,9 @@ func testAccessMultipleVolumes(f *framework.Framework, cs clientset.Interface, n
 	podConfig := e2epod.Config{
 		NS:            ns,
 		PVCs:          pvcs,
-		SeLinuxLabel:  e2evolume.GetLinuxLabel(),
+		SeLinuxLabel:  e2epod.GetLinuxLabel(),
 		NodeSelection: node,
-		ImageID:       e2evolume.GetDefaultTestImageID(),
+		ImageID:       e2epod.GetDefaultTestImageID(),
 	}
 	pod, err := e2epod.CreateSecPodWithNodeSelection(cs, &podConfig, f.Timeouts.PodStart)
 	defer func() {
@@ -487,10 +487,10 @@ func TestConcurrentAccessToSingleVolume(f *framework.Framework, cs clientset.Int
 		podConfig := e2epod.Config{
 			NS:            ns,
 			PVCs:          []*v1.PersistentVolumeClaim{pvc},
-			SeLinuxLabel:  e2evolume.GetLinuxLabel(),
+			SeLinuxLabel:  e2epod.GetLinuxLabel(),
 			NodeSelection: node,
 			PVCsReadOnly:  readOnly,
-			ImageID:       e2evolume.GetTestImageID(imageutils.DebianIptables),
+			ImageID:       e2epod.GetTestImageID(imageutils.JessieDnsutils),
 		}
 		pod, err := e2epod.CreateSecPodWithNodeSelection(cs, &podConfig, f.Timeouts.PodStart)
 		defer func() {
@@ -510,17 +510,21 @@ func TestConcurrentAccessToSingleVolume(f *framework.Framework, cs clientset.Int
 		}
 	}
 
+	path := "/mnt/volume1"
+
 	var seed int64
 	byteLen := 64
 	directIO := false
 	// direct IO is needed for Block-mode PVs
 	if *pvc.Spec.VolumeMode == v1.PersistentVolumeBlock {
+		if len(pods) < 1 {
+			framework.Failf("Number of pods shouldn't be less than 1, but got %d", len(pods))
+		}
 		// byteLen should be the size of a sector to enable direct I/O
-		byteLen = 512
+		byteLen = utils.GetSectorSize(f, pods[0], path)
 		directIO = true
 	}
 
-	path := "/mnt/volume1"
 	// Check if volume can be accessed from each pod
 	for i, pod := range pods {
 		index := i + 1
@@ -653,9 +657,9 @@ func initializeVolume(cs clientset.Interface, t *framework.TimeoutContext, ns st
 	podConfig := e2epod.Config{
 		NS:            ns,
 		PVCs:          []*v1.PersistentVolumeClaim{pvc},
-		SeLinuxLabel:  e2evolume.GetLinuxLabel(),
+		SeLinuxLabel:  e2epod.GetLinuxLabel(),
 		NodeSelection: node,
-		ImageID:       e2evolume.GetDefaultTestImageID(),
+		ImageID:       e2epod.GetDefaultTestImageID(),
 	}
 	pod, err := e2epod.CreateSecPod(cs, &podConfig, t.PodStart)
 	defer func() {
